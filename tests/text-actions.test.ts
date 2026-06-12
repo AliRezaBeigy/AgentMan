@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest"
 
 import {
   appendTextActionInstructions,
+  countTextActionsInContent,
+  looksLikeActionArray,
+  looksLikeRootActionArrayStarting,
   looksLikeFailedTextAction,
   parseTextAction,
   textActionToToolCalls
@@ -86,5 +89,30 @@ describe("text-actions", () => {
     appendTextActionInstructions(messages)
     expect(messages[0].content).toContain("does NOT support native tool calling")
     expect(messages[0].content.split("does NOT support native tool calling")).toHaveLength(2)
+  })
+
+  it("parses only the first action from a JSON array", () => {
+    const content = `\`\`\`json
+[
+  {"action":"click","section":"Work experience"},
+  {"action":"fill_fields","fields":[{"selector":"#a","value":"b"}]}
+]
+\`\`\``
+    expect(parseTextAction(content)).toBeNull()
+    expect(countTextActionsInContent(content)).toBe(2)
+    expect(looksLikeActionArray(content)).toBe(true)
+    expect(looksLikeRootActionArrayStarting(content)).toBe(true)
+  })
+
+  it("allows fill_fields inner array but not root action array", () => {
+    const content = '{"action":"fill_fields","fields":[{"selector":"#a","value":"b"}]}'
+    expect(looksLikeRootActionArrayStarting(content)).toBe(false)
+    expect(parseTextAction(content)?.name).toBe("fill_fields")
+  })
+
+  it("rejects fill_fields that echo field metadata without values", () => {
+    const content = `{"action":"fill_fields","fields":[{"selector":"#a","label":"Title","type":"text"}]}`
+    expect(parseTextAction(content)).toBeNull()
+    expect(looksLikeFailedTextAction(content)).toBe(true)
   })
 })

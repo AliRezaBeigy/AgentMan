@@ -31,7 +31,9 @@ async function getPageContextFromTab(tabId: number): Promise<PageContext> {
     )
   }
 
-  return response.payload
+  const payload = response.payload
+
+  return payload
 }
 
 async function captureTabScreenshot(tabId?: number): Promise<string> {

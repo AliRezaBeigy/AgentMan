@@ -129,6 +129,7 @@ export function SidePanelApp() {
         const payload = message.payload as { sessionId: string; content: string }
         if (payload.sessionId !== activeId) return
         setIsSending(false)
+        setAgentState({ status: "idle", iteration: 0 })
         setSession((prev) => {
           const messages = [...prev.messages]
           const last = messages[messages.length - 1]
@@ -156,6 +157,7 @@ export function SidePanelApp() {
         const payload = message.payload as { sessionId: string; error: string }
         if (payload.sessionId !== activeId) return
         setIsSending(false)
+        setAgentState({ status: "idle", iteration: 0 })
         setSession((prev) => {
           const next = {
             ...prev,
@@ -176,7 +178,11 @@ export function SidePanelApp() {
       }
 
       if (message.type === MessageType.AGENT_STATE) {
-        setAgentState(message.payload as AgentState)
+        const state = message.payload as AgentState
+        setAgentState(state)
+        if (state.status === "idle" || state.status === "stopped") {
+          setIsSending(false)
+        }
       }
 
       if (message.type === MessageType.SCREENSHOT_CAPTURED) {
@@ -189,11 +195,23 @@ export function SidePanelApp() {
     return () => chrome.runtime.onMessage.removeListener(listener)
   }, [persistSession])
 
+  const isBusy =
+    isSending || agentState.status === "running" || agentState.status === "paused"
+
   async function stopIfRunning() {
-    if (isSending || agentState.status === "running" || agentState.status === "paused") {
+    if (isBusy) {
       await chrome.runtime.sendMessage({ type: MessageType.AGENT_STOP })
       setIsSending(false)
+      setAgentState({ status: "idle", iteration: 0 })
     }
+  }
+
+  async function handleSendOrStop() {
+    if (isBusy) {
+      await stopIfRunning()
+      return
+    }
+    await handleSend()
   }
 
   async function dispatchChat(
@@ -280,7 +298,7 @@ export function SidePanelApp() {
         ? "Fill the form using the attached file(s) as context."
         : "")
     if (!content && !pendingImages.length && !attachments.length) return
-    if (isSending) return
+    if (isBusy) return
 
     const attachmentNote =
       attachments.length > 0
@@ -442,7 +460,7 @@ export function SidePanelApp() {
             <ChatMessage
               key={message.id}
               message={message}
-              disabled={isSending}
+              disabled={isBusy}
               onEdit={message.role === "user" ? handleEditMessage : undefined}
               onRetry={handleRetryMessage}
             />
@@ -549,8 +567,10 @@ export function SidePanelApp() {
                 </Button>
               </>
             )}
-            <Button onClick={handleSend} disabled={isSending}>
-              {isSending ? "Running…" : "Send"}
+            <Button
+              variant={isBusy ? "destructive" : "default"}
+              onClick={() => void handleSendOrStop()}>
+              {isBusy ? "Stop" : "Send"}
             </Button>
           </div>
         </div>

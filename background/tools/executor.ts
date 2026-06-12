@@ -89,21 +89,10 @@ export async function executeTool(
           type: MessageType.CURSOR_CAPTION,
           payload: { text: `Filling ${fields.length} field(s)` }
         })
-        for (const item of fields) {
-          const selector = item.selector
-          const value = item.value
-          if (!selector) continue
-          try {
-            await cdpSession.fillSelector(selector, value)
-            results.push({ selector, ok: true })
-          } catch (error) {
-            results.push({
-              selector,
-              ok: false,
-              error: error instanceof Error ? error.message : "fill failed"
-            })
-          }
-        }
+        const batchItems = fields
+          .filter((item) => item.selector)
+          .map((item) => ({ selector: item.selector, value: item.value }))
+        results.push(...(await cdpSession.fillSelectorsBatch(batchItems)))
         const failed = results.filter((r) => !r.ok)
         return {
           ok: failed.length === 0,
@@ -185,9 +174,10 @@ export async function executeTool(
         return { ok: false, error: `Unknown tool: ${name}` }
     }
   } catch (error) {
+    const toolError = error instanceof Error ? error.message : "Tool execution failed"
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Tool execution failed"
+      error: toolError
     }
   }
 }

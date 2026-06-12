@@ -2,12 +2,13 @@ import { devLog, devLogRequest, devLogResponse } from "~/lib/dev-log"
 import { timingFromOllamaChunk, type OllamaChatTiming } from "~/lib/ollama/timing"
 import {
   extractOllamaErrorBody,
+  ChatAbortedError,
   isToolsNotSupportedMessage,
   OllamaToolsNotSupportedError
 } from "~/lib/ollama/errors"
 import type { OllamaToolCall } from "~/lib/types"
 
-export { OllamaToolsNotSupportedError } from "~/lib/ollama/errors"
+export { OllamaToolsNotSupportedError, ChatAbortedError } from "~/lib/ollama/errors"
 
 export interface OllamaMessage {
   role: "system" | "user" | "assistant" | "tool"
@@ -31,7 +32,9 @@ export interface ChatOptions {
   messages: OllamaMessage[]
   tools?: OllamaTool[]
   stream?: boolean
-  format?: "json"
+  format?: "json" | Record<string, unknown>
+  /** Stop generation early when this returns true (streaming only). */
+  shouldAbort?: (contentSoFar: string) => boolean
   /** Keep model in VRAM between requests — enables Ollama KV prefix cache. */
   keepAlive?: string | number
   options?: Record<string, unknown>
@@ -99,7 +102,8 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
     format,
     keepAlive,
     options: ollamaOptions,
-    onChunk
+    onChunk,
+    shouldAbort
   } = chatOptions
   const body: Record<string, unknown> = {
     model,
@@ -191,6 +195,10 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
       const delta = chunk.message?.content ?? ""
       if (delta) {
         content += delta
+        if (shouldAbort?.(content)) {
+          await reader.cancel()
+          throw new ChatAbortedError(content, "Generation aborted early")
+        }
         onChunk?.(delta)
       }
       if (chunk.message?.tool_calls?.length) {

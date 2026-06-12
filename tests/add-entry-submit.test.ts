@@ -3,12 +3,11 @@ import { describe, expect, it } from "vitest"
 import { formatSubmitFailureMessage } from "~/background/add-entry-submit"
 
 describe("add-entry-submit", () => {
-  it("formats validation errors for the agent", () => {
+  it("formats submit failure for the agent", () => {
     const message = formatSubmitFailureMessage({
       ok: false,
-      validationErrors: ["Finished part: Please select an item in the list."]
+      error: "Submit clicked but the form did not close."
     })
-    expect(message).toContain("Finished part")
-    expect(message).toContain("fill_fields")
+    expect(message).toContain("form did not close")
   })
 })

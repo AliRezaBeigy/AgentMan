@@ -13,12 +13,14 @@ import {
 import {
   cropDataUrl,
   hideAgentUi,
-  hideStopOverlay,
   moveCursor,
   setCaption,
-  showStopOverlay,
   startScreenshotSelection
 } from "~/contents/lib/overlay"
+import {
+  restorePageValidation,
+  suppressPageValidation
+} from "~/contents/lib/validation-suppress"
 import { MessageType, type RuntimeMessage } from "~/lib/messages"
 import type { PageContext } from "~/lib/types"
 
@@ -29,13 +31,15 @@ export const config: PlasmoCSConfig = {
 }
 
 function buildPageContext(): PageContext {
-  return {
+  const fields = detectFormFields()
+  const addEntrySections = detectAddEntrySections()
+  const ctx: PageContext = {
     url: location.href,
     title: document.title,
     textSummary: getTextSummary(),
-    fields: detectFormFields(),
+    fields,
     repeatableSections: detectRepeatableSections(),
-    addEntrySections: detectAddEntrySections(),
+    addEntrySections,
     viewport: {
       width: window.innerWidth,
       height: window.innerHeight,
@@ -43,6 +47,8 @@ function buildPageContext(): PageContext {
       scrollY: window.scrollY
     }
   }
+
+  return ctx
 }
 
 function countInteractiveFields(root: Document | Element = document): number {
@@ -118,20 +124,18 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResp
       sendResponse({ ok: true })
       return true
 
-    case MessageType.SHOW_STOP_OVERLAY:
-      showStopOverlay(() => {
-        chrome.runtime.sendMessage({ type: MessageType.AGENT_STOP })
-      })
-      sendResponse({ ok: true })
-      return true
-
-    case MessageType.HIDE_STOP_OVERLAY:
-      hideStopOverlay()
-      sendResponse({ ok: true })
-      return true
-
     case MessageType.HIDE_UI_FOR_SCREENSHOT:
       hideAgentUi()
+      sendResponse({ ok: true })
+      return true
+
+    case MessageType.SUPPRESS_PAGE_VALIDATION:
+      suppressPageValidation()
+      sendResponse({ ok: true })
+      return true
+
+    case MessageType.RESTORE_PAGE_VALIDATION:
+      restorePageValidation()
       sendResponse({ ok: true })
       return true
 

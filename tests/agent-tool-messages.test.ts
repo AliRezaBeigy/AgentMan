@@ -17,8 +17,7 @@ describe("compactToolResultForAgent", () => {
           openedNext: true,
           sectionLabel: "Work experience",
           entryNumber: 2,
-          nextStep: "Fill entry 2",
-          validationErrors: ["Choose a value for Country"]
+          nextStep: "Fill entry 2"
         }
       }
     })
@@ -34,8 +33,7 @@ describe("compactToolResultForAgent", () => {
         sectionLabel: "Work experience",
         entryNumber: 2,
         nextStep: "Fill entry 2",
-        error: undefined,
-        validationErrors: ["Choose a value for Country"]
+        error: undefined
       }
     })
     expect(compact).not.toHaveProperty("results")

@@ -76,11 +76,62 @@ export class CdpSession {
         } else {
           this.value = value;
         }
+        if (typeof this.setCustomValidity === 'function') this.setCustomValidity('');
+        const form = this.closest('form');
+        if (form) form.noValidate = true;
         this.dispatchEvent(new Event('input', { bubbles: true }));
         this.dispatchEvent(new Event('change', { bubbles: true }));
       }`,
       arguments: [{ value }]
     })
+  }
+
+  async fillSelectorsBatch(
+    items: Array<{ selector: string; value: string }>
+  ): Promise<Array<{ selector: string; ok: boolean; error?: string }>> {
+    if (!items.length) return []
+
+    const { result } = await this.send<{ result: { value?: Array<{ selector: string; ok: boolean; error?: string }> } }>(
+      "Runtime.evaluate",
+      {
+        expression: `(() => {
+          const items = ${JSON.stringify(items)};
+          const results = [];
+          for (const item of items) {
+            const el = document.querySelector(item.selector);
+            if (!el) {
+              results.push({ selector: item.selector, ok: false, error: "Element not found" });
+              continue;
+            }
+            try {
+              const value = item.value;
+              if (el.type === "checkbox") {
+                el.checked = value === "true" || value === true;
+              } else if (el.tagName === "SELECT") {
+                el.value = value;
+              } else {
+                el.value = value;
+              }
+              if (typeof el.setCustomValidity === "function") el.setCustomValidity("");
+              const form = el.closest("form");
+              if (form) form.noValidate = true;
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+              el.dispatchEvent(new Event("change", { bubbles: true }));
+              results.push({ selector: item.selector, ok: true });
+            } catch (error) {
+              results.push({
+                selector: item.selector,
+                ok: false,
+                error: error instanceof Error ? error.message : "fill failed"
+              });
+            }
+          }
+          return results;
+        })()`,
+        returnByValue: true
+      }
+    )
+    return result.value ?? []
   }
 
   async navigate(url: string): Promise<void> {

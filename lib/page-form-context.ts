@@ -1,3 +1,5 @@
+import { pickCssSelector } from "~/lib/add-entry-workflow"
+import { buildFillFieldAliasRegistry } from "~/lib/fill-field-aliases"
 import { getFillableFields } from "~/lib/fill-parse"
 import type { AddEntrySectionDescriptor, FormFieldDescriptor, PageContext } from "~/lib/types"
 
@@ -265,6 +267,67 @@ export function buildAgentFormContextNote(
   }
 
   return lines.length ? `\n\n${lines.join("\n")}` : ""
+}
+
+export function buildCompactAddEntrySystemPrompt(
+  pageContext: PageContext,
+  userMessage?: string
+): string {
+  const sections = userMessage
+    ? filterAddEntrySectionsForIntent(
+        pageContext.addEntrySections ?? [],
+        userMessage,
+        pageContext.fields
+      )
+    : (pageContext.addEntrySections ?? [])
+
+  const { promptBlock: fieldAliases } = buildFillFieldAliasRegistry(pageContext, userMessage)
+
+  const sectionLines = sections
+    .map(
+      (section) =>
+        `${section.sectionLabel}|open:${section.addButtonSelector}|save:${pickCssSelector(section.submitSelector)}`
+    )
+    .join("\n")
+
+  return `AgentMan. Page: ${pageContext.url}
+Return ONE JSON object per turn — never a JSON array.
+Workflow: click section → fill_fields → auto-save → next entry.
+Sections (label|open|save):
+${sectionLines}
+Field aliases (alias;type;options) — use alias as selector in fill_fields, or #element-id:
+${fieldAliases}
+Example: {"action":"fill_fields","fields":[{"selector":"work:title","value":"..."},{"selector":"#cvjob-company","value":"..."}]}`
+}
+
+export const ADD_ENTRY_TURN_HINT_PREFIX = "[Next step]"
+
+export function buildAddEntryTurnHint(
+  addEntryCounts: ReadonlyMap<string, number>,
+  lastToolName: string | null
+): string {
+  const workCount = addEntryCounts.get("Work experience") ?? 0
+  const educationCount = addEntryCounts.get("Education") ?? 0
+
+  if (!lastToolName) {
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE JSON object only (not an array). First: {"action":"click","section":"Work experience"}`
+  }
+
+  if (lastToolName === "click") {
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} Form open. Return fill_fields using work:* / edu:* aliases (or #id) with values from the attachment.`
+  }
+
+  if (lastToolName === "fill_fields") {
+    if (workCount === 0) {
+      return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action: open Work experience or fill the next work entry from the attachment.`
+    }
+    if (educationCount === 0) {
+      return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action: {"action":"click","section":"Education"} or fill the next work entry if more remain.`
+    }
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action for the next unsaved entry, or {"action":"done","message":"..."} when all items are saved.`
+  }
+
+  return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE JSON object for the immediate next step.`
 }
 
 export function buildAgentSystemPrompt(pageContext: PageContext, userMessage?: string): string {

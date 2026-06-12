@@ -29,8 +29,7 @@ export function compactToolResultForAgent(
             sectionLabel: addEntry.sectionLabel,
             entryNumber: addEntry.entryNumber,
             nextStep: addEntry.nextStep,
-            error: addEntry.error,
-            validationErrors: addEntry.validationErrors
+            error: addEntry.error
           }
         : undefined
     }
@@ -86,6 +85,27 @@ export function compactToolResultForAgent(
   }
 
   return { ok: toolResult.ok, error: toolResult.error }
+}
+
+export function formatCompactAgentToolResultMessage(
+  toolName: string,
+  toolResult: AgentToolResult
+): string {
+  const compact = compactToolResultForAgent(toolName, toolResult)
+  if (toolName === "fill_fields") {
+    const addEntry = compact.addEntry as Record<string, unknown> | undefined
+    if (addEntry) {
+      return `Saved ${addEntry.sectionLabel} entry ${addEntry.entryNumber}. ${addEntry.nextStep ?? ""}`.trim()
+    }
+    return `Filled ${compact.filled ?? 0} field(s).`
+  }
+  if (toolName === "click") {
+    const wait = compact.addEntryWait as Record<string, unknown> | undefined
+    if (wait?.section) return `Opened ${wait.section}.`
+    return compact.ok ? "Click ok." : `Click failed: ${compact.error ?? "unknown"}`
+  }
+  if (toolName === "done") return "Done."
+  return compact.ok ? `${toolName} ok.` : `${toolName} failed: ${compact.error ?? "unknown"}`
 }
 
 export function formatAgentToolResultMessage(

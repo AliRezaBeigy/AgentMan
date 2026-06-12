@@ -11,6 +11,13 @@ export interface ParsedTextAction {
   args: Record<string, unknown>
 }
 
+export function buildCompactTextActionSystemPrompt(): string {
+  return `Return exactly ONE JSON object per turn (never a JSON array). Use a \`\`\`json fence.
+Example: {"action":"click","section":"Work experience"}
+fill_fields must use {"selector":"...","value":"data from attachment"} — never echo field definitions without values.
+Wait for the action result before the next turn.`
+}
+
 export function buildTextActionSystemPrompt(): string {
   return `IMPORTANT: This model does NOT support native tool calling. Do not describe tools — return JSON actions only.
 
@@ -28,19 +35,102 @@ Rules:
 - Copy field selectors exactly from the field list (do not guess ids like #cvjob-employer).
 - Finish ALL work experience entries before {"action":"click","section":"Education"}.
 - One fill_fields per entry; extension auto-saves and reopens the form.
-- Call done only when every section has all items from the attachment saved.`
+- Call done only when every section has all items from the attachment saved.
+- NEVER return a JSON array of actions — one object per turn only.`
+}
+
+export function buildTextActionJsonSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      action: {
+        type: "string",
+        enum: ["click", "fill_fields", "done", "get_page_content"]
+      },
+      section: { type: "string" },
+      selector: { type: "string" },
+      message: { type: "string" },
+      fields: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            selector: { type: "string" },
+            value: { type: "string" }
+          },
+          required: ["selector", "value"]
+        }
+      }
+    },
+    required: ["action"],
+    additionalProperties: true
+  }
+}
+
+function jsonCandidate(content: string): string | null {
+  const trimmed = content.trim()
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*)/i)
+  if (fenced) return fenced[1]
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) return trimmed
+  return null
+}
+
+/** True when streamed output starts a root-level JSON array (multi-step plan). */
+export function looksLikeRootActionArrayStarting(content: string): boolean {
+  const candidate = jsonCandidate(content)
+  if (!candidate) return false
+  return candidate.trimStart().startsWith("[")
 }
 
 /** Parse a single browser action from model text (non-tool models). */
 export function parseTextAction(content: string): ParsedTextAction | null {
   const trimmed = content.trim()
   const parsed = extractJsonValue(trimmed)
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+  if (Array.isArray(parsed)) {
+    return null
+  }
+  if (parsed && typeof parsed === "object") {
     const fromObject = actionFromRecord(parsed as Record<string, unknown>)
     if (fromObject) return fromObject
   }
 
   return parseTextActionLoose(trimmed)
+}
+
+export function countTextActionsInContent(content: string): number {
+  const parsed = extractJsonValue(content.trim())
+  if (Array.isArray(parsed)) {
+    return parsed.filter(
+      (item) =>
+        item &&
+        typeof item === "object" &&
+        String((item as Record<string, unknown>).action ?? "").trim()
+    ).length
+  }
+  return parseTextAction(content) ? 1 : 0
+}
+
+export function looksLikeActionArray(content: string): boolean {
+  return countTextActionsInContent(content) > 1
+}
+
+export function fillFieldsActionHasValues(args: Record<string, unknown>): boolean {
+  const fields = parseFillFieldsArg(args.fields)
+  return fields.some((field) => field.value.trim().length > 0)
+}
+
+export function buildMultiActionRejectionMessage(): string {
+  return `Do NOT return a JSON array of steps. Return ONE JSON object for the immediate next action only, then wait for the result.
+Example next step: {"action":"click","section":"Work experience"}`
+}
+
+export function buildEmptyFillFieldsRejectionMessage(): string {
+  return `fill_fields must include a "value" for each field from the user's attachment — not field labels/types/options.
+Example: {"action":"fill_fields","fields":[{"selector":"[data-agentman-field-key=\\"Work experience - Title\\"]","value":"Teaching Assistant"}]}`
+}
+
+export function shouldSuppressActionArrayStream(content: string): boolean {
+  return looksLikeRootActionArrayStarting(content)
 }
 
 function actionFromRecord(obj: Record<string, unknown>): ParsedTextAction | null {
@@ -56,7 +146,9 @@ function actionFromRecord(obj: Record<string, unknown>): ParsedTextAction | null
 
   if (name === "fill_fields") {
     const fields = parseFillFieldsArg(obj.fields)
-    if (fields.length) return { name, args: { fields } }
+    if (!fields.length) return null
+    if (fields.every((field) => !field.value.trim())) return null
+    return { name, args: { fields } }
   }
 
   if (name === "click" && obj.section) {
@@ -117,12 +209,16 @@ function parseTextActionLoose(content: string): ParsedTextAction | null {
     const arrayMatch = content.match(/"fields"\s*:\s*(\[[\s\S]*\])/)
     if (arrayMatch) {
       const fields = parseFillFieldsArg(arrayMatch[1])
-      if (fields.length) return { name, args: { fields } }
+      if (fields.length && fields.some((field) => field.value.trim())) {
+        return { name, args: { fields } }
+      }
     }
     const stringMatch = content.match(/"fields"\s*:\s*"((?:[^"\\]|\\.)*)"/)
     if (stringMatch) {
       const fields = parseFillFieldsArg(unescapeJsonString(stringMatch[1]))
-      if (fields.length) return { name, args: { fields } }
+      if (fields.length && fields.some((field) => field.value.trim())) {
+        return { name, args: { fields } }
+      }
     }
   }
 
@@ -211,7 +307,7 @@ export function textActionNeedsFollowUp(content: string): boolean {
 }
 
 export function buildTextActionRetryMessage(): string {
-  return `Your JSON action could not be parsed. Return ONE valid action inside a \`\`\`json fence.
+  return `Return ONE JSON object (not an array) inside a \`\`\`json fence.
 To open a section: {"action":"click","section":"Work experience"}
 To fill: {"action":"fill_fields","fields":[{"selector":"#cvjob-position","value":"Engineer"}]}`
 }
@@ -228,11 +324,14 @@ export function textActionToToolCalls(
 }
 
 /** Append JSON-action instructions to the agent system prompt. */
-export function appendTextActionInstructions(messages: OllamaMessage[]): void {
-  const addon = buildTextActionSystemPrompt()
+export function appendTextActionInstructions(
+  messages: OllamaMessage[],
+  compact = false
+): void {
+  const addon = compact ? buildCompactTextActionSystemPrompt() : buildTextActionSystemPrompt()
   const system = messages.find((m) => m.role === "system")
   if (system) {
-    if (!system.content.includes("does NOT support native tool calling")) {
+    if (!system.content.includes("JSON object per turn")) {
       system.content = `${system.content}\n\n${addon}`
     }
     return

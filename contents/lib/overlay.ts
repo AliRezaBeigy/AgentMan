@@ -1,6 +1,5 @@
 const CURSOR_ID = "agentman-cursor"
 const CAPTION_ID = "agentman-caption"
-const STOP_ID = "agentman-stop-overlay"
 
 export function ensureCursor(): HTMLElement {
   let cursor = document.getElementById(CURSOR_ID)
@@ -40,35 +39,10 @@ export function setCaption(text: string): void {
   caption.textContent = text
 }
 
-export function showStopOverlay(onStop: () => void): void {
-  if (document.getElementById(STOP_ID)) return
-
-  const overlay = document.createElement("div")
-  overlay.id = STOP_ID
-  overlay.style.cssText = `
-    position: fixed; right: 16px; bottom: 16px; z-index: 2147483647;
-  `
-
-  const button = document.createElement("button")
-  button.textContent = "Stop Agent"
-  button.style.cssText = `
-    background: hsl(0 84% 60%); color: white; border: none; border-radius: 999px;
-    padding: 10px 16px; font: 600 13px Inter, system-ui, sans-serif; cursor: pointer;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-  `
-  button.addEventListener("click", onStop)
-  overlay.appendChild(button)
-  document.documentElement.appendChild(overlay)
-}
-
-export function hideStopOverlay(): void {
-  document.getElementById(STOP_ID)?.remove()
-}
-
 export function hideAgentUi(): void {
   document.getElementById(CURSOR_ID)?.remove()
   document.getElementById(CAPTION_ID)?.remove()
-  hideStopOverlay()
+  document.getElementById("agentman-stop-overlay")?.remove()
 }
 
 export function startScreenshotSelection(
