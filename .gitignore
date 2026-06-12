@@ -1,0 +1,7 @@
+node_modules/
+build/
+.plasmo/
+/openspec/
+/.cursor/
+*.log
+.DS_Store
