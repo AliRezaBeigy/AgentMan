@@ -1,5 +1,13 @@
-import { devLogRequest, devLogResponse } from "~/lib/dev-log"
+import { devLog, devLogRequest, devLogResponse } from "~/lib/dev-log"
+import { timingFromOllamaChunk, type OllamaChatTiming } from "~/lib/ollama/timing"
+import {
+  extractOllamaErrorBody,
+  isToolsNotSupportedMessage,
+  OllamaToolsNotSupportedError
+} from "~/lib/ollama/errors"
 import type { OllamaToolCall } from "~/lib/types"
+
+export { OllamaToolsNotSupportedError } from "~/lib/ollama/errors"
 
 export interface OllamaMessage {
   role: "system" | "user" | "assistant" | "tool"
@@ -24,6 +32,8 @@ export interface ChatOptions {
   tools?: OllamaTool[]
   stream?: boolean
   format?: "json"
+  /** Keep model in VRAM between requests — enables Ollama KV prefix cache. */
+  keepAlive?: string | number
   options?: Record<string, unknown>
   onChunk?: (delta: string) => void
 }
@@ -31,7 +41,10 @@ export interface ChatOptions {
 export interface ChatResult {
   content: string
   toolCalls: OllamaToolCall[]
+  timing?: OllamaChatTiming
 }
+
+export type { OllamaChatTiming } from "~/lib/ollama/timing"
 
 function ollamaErrorMessage(status: number): string {
   if (status === 403) {
@@ -84,6 +97,7 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
     tools,
     stream = true,
     format,
+    keepAlive,
     options: ollamaOptions,
     onChunk
   } = chatOptions
@@ -91,6 +105,9 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
     model,
     messages,
     stream
+  }
+  if (keepAlive !== undefined) {
+    body.keep_alive = keepAlive
   }
   if (tools?.length) {
     body.tools = tools
@@ -113,13 +130,20 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
   })
 
   if (!res.ok) {
-    devLogResponse("Ollama chat", res.status, { error: ollamaErrorMessage(res.status) })
-    throw new Error(ollamaErrorMessage(res.status))
+    const errorBody = await readOllamaErrorResponse(res)
+    devLogResponse("Ollama chat", res.status, errorBody ?? { error: ollamaErrorMessage(res.status) })
+    throwOllamaChatError(errorBody, ollamaErrorMessage(res.status))
   }
 
   if (!stream) {
     const data = await res.json()
-    const result = parseChatResponse(data)
+    const apiError = extractOllamaErrorBody(data)
+    if (apiError) throwOllamaChatError(data, apiError)
+    const result = {
+      ...parseChatResponse(data),
+      timing: timingFromOllamaChunk(data as { done?: boolean }) ?? undefined
+    }
+    logChatTiming(result.timing)
     devLogResponse("Ollama chat", res.status, result)
     return result
   }
@@ -133,6 +157,7 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
   let content = ""
   const toolCalls: OllamaToolCall[] = []
   let buffer = ""
+  let timing: OllamaChatTiming | undefined
 
   while (true) {
     const { done, value } = await reader.read()
@@ -145,11 +170,24 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
     for (const line of lines) {
       if (!line.trim()) continue
       const chunk = JSON.parse(line) as {
+        error?: string
+        done?: boolean
+        prompt_eval_count?: number
+        prompt_eval_duration?: number
+        eval_count?: number
+        eval_duration?: number
+        total_duration?: number
+        load_duration?: number
         message?: {
           content?: string
           tool_calls?: OllamaToolCall[]
         }
       }
+      if (chunk.error) {
+        throwOllamaChatError(chunk, chunk.error)
+      }
+      const chunkTiming = timingFromOllamaChunk(chunk)
+      if (chunkTiming) timing = chunkTiming
       const delta = chunk.message?.content ?? ""
       if (delta) {
         content += delta
@@ -161,9 +199,19 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
     }
   }
 
-  const result = { content, toolCalls }
-  devLogResponse("Ollama chat (stream)", res.status, result)
+  const result = { content, toolCalls, timing }
+  logChatTiming(timing)
+  devLogResponse("Ollama chat (stream)", res.status, {
+    content: result.content.slice(0, 200),
+    toolCalls: result.toolCalls,
+    timing: result.timing
+  })
   return result
+}
+
+function logChatTiming(timing?: OllamaChatTiming): void {
+  if (!timing) return
+  devLog("Ollama prompt eval", timing)
 }
 
 function parseChatResponse(data: {
@@ -173,4 +221,24 @@ function parseChatResponse(data: {
     content: data.message?.content ?? "",
     toolCalls: data.message?.tool_calls ?? []
   }
+}
+
+async function readOllamaErrorResponse(res: Response): Promise<unknown> {
+  try {
+    return await res.json()
+  } catch {
+    try {
+      return { error: await res.text() }
+    } catch {
+      return null
+    }
+  }
+}
+
+function throwOllamaChatError(body: unknown, fallback: string): never {
+  const message = extractOllamaErrorBody(body) ?? fallback
+  if (isToolsNotSupportedMessage(message)) {
+    throw new OllamaToolsNotSupportedError(message)
+  }
+  throw new Error(message)
 }

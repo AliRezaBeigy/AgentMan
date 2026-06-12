@@ -1,6 +1,9 @@
 import { checkOllamaHealth, listModels } from "~/lib/ollama/client"
 
+import { DEEPSEEK_LITE_MODEL } from "../fixtures/deepseek-text-actions"
+
 export const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434"
+export { DEEPSEEK_LITE_MODEL }
 
 export interface OllamaTestContext {
   available: boolean

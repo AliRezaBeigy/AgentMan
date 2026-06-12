@@ -1,5 +1,6 @@
 import { cdpSession } from "~/background/cdp/session"
 import { MessageType } from "~/lib/messages"
+import { parseFillFieldsArg } from "~/lib/tool-args"
 import type { PageContext } from "~/lib/types"
 
 export interface ToolResult {
@@ -73,6 +74,44 @@ export async function executeTool(
         return { ok: true, result: { selector, value } }
       }
 
+      case "fill_fields": {
+        const fields = parseFillFieldsArg(args.fields)
+        if (!fields.length) {
+          return {
+            ok: false,
+            error:
+              'fill_fields could not parse any {selector, value} pairs. Pass fields as an array or valid JSON string.',
+            result: { filled: 0, results: [], parseError: true }
+          }
+        }
+        const results: Array<{ selector: string; ok: boolean; error?: string }> = []
+        await chrome.tabs.sendMessage(tabId, {
+          type: MessageType.CURSOR_CAPTION,
+          payload: { text: `Filling ${fields.length} field(s)` }
+        })
+        for (const item of fields) {
+          const selector = item.selector
+          const value = item.value
+          if (!selector) continue
+          try {
+            await cdpSession.fillSelector(selector, value)
+            results.push({ selector, ok: true })
+          } catch (error) {
+            results.push({
+              selector,
+              ok: false,
+              error: error instanceof Error ? error.message : "fill failed"
+            })
+          }
+        }
+        const failed = results.filter((r) => !r.ok)
+        return {
+          ok: failed.length === 0,
+          result: { filled: results.filter((r) => r.ok).length, results },
+          error: failed.length ? `${failed.length} field(s) failed` : undefined
+        }
+      }
+
       case "navigate": {
         const url = String(args.url ?? "")
         await cdpSession.navigate(url)
@@ -130,7 +169,16 @@ export async function executeTool(
 
       case "get_page_content": {
         const pageContext = await context.getPageContext()
-        return { ok: true, result: pageContext }
+        const summary = pageContext.textSummary ?? ""
+        const maxSummary = 3500
+        return {
+          ok: true,
+          result: {
+            ...pageContext,
+            textSummary:
+              summary.length > maxSummary ? `${summary.slice(0, maxSummary)}…` : summary
+          }
+        }
       }
 
       default:

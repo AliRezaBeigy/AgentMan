@@ -49,6 +49,30 @@ export const AGENT_TOOLS: OllamaTool[] = [
   {
     type: "function",
     function: {
+      name: "fill_fields",
+      description: "Set multiple input, textarea, or select elements in one step",
+      parameters: {
+        type: "object",
+        properties: {
+          fields: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                selector: { type: "string" },
+                value: { type: "string" }
+              },
+              required: ["selector", "value"]
+            }
+          }
+        },
+        required: ["fields"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "navigate",
       description: "Navigate the active tab to a URL",
       parameters: {

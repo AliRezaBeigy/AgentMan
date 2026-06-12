@@ -11,7 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/fill-parse.test.ts",
-    "test:integration": "vitest run tests/ollama.integration.test.ts tests/ollama-fill.integration.test.ts tests/ollama-expense-repeatable.integration.test.ts",
+    "test:integration": "vitest run tests/ollama.integration.test.ts tests/ollama-fill.integration.test.ts tests/ollama-expense-repeatable.integration.test.ts tests/ollama-deepseek-text-action.integration.test.ts",
     "test:dom": "vitest run tests/form-engine-repeatable.test.ts"
   },
   "dependencies": {

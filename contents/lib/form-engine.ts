@@ -1,4 +1,10 @@
-import type { FormFieldDescriptor, RepeatableSectionDescriptor } from "~/lib/types"
+import { cleanFieldLabel } from "~/lib/field-labels"
+import { findSectionLabel } from "~/lib/field-sections"
+import type {
+  AddEntrySectionDescriptor,
+  FormFieldDescriptor,
+  RepeatableSectionDescriptor
+} from "~/lib/types"
 
 export function detectFormFields(root: Document | Element = document): FormFieldDescriptor[] {
   const fields: FormFieldDescriptor[] = []
@@ -18,7 +24,8 @@ export function detectFormFields(root: Document | Element = document): FormField
     }
 
     const container = findFieldContainer(el)
-    const label = findLabel(el, container)
+    const rawLabel = findLabel(el, container)
+    const label = rawLabel ? buildContextualFieldKey(el, rawLabel) : undefined
     const selector = buildSelector(el, index, label)
 
     if (seenSelectors.has(selector)) return
@@ -89,17 +96,33 @@ export function detectFormFields(root: Document | Element = document): FormField
   fields.push(...detectStandaloneComboboxes(root, seenSelectors, fields))
   fields.push(...detectButtonGroups(root, seenSelectors))
   fields.push(...detectPdfJsFields(root))
-  return dedupeFieldsByLabel(fields)
+  return dedupeFieldsBySelector(fields)
 }
 
-function dedupeFieldsByLabel(fields: FormFieldDescriptor[]): FormFieldDescriptor[] {
+function dedupeFieldsBySelector(fields: FormFieldDescriptor[]): FormFieldDescriptor[] {
   const seen = new Set<string>()
   return fields.filter((field) => {
-    const key = fieldFillKey(field)
-    if (seen.has(key)) return false
-    seen.add(key)
+    if (seen.has(field.selector)) return false
+    seen.add(field.selector)
     return true
   })
+}
+
+function buildContextualFieldKey(el: Element, rawLabel: string): string {
+  const label = cleanFieldLabel(rawLabel)
+  const section = findSectionLabel(el)
+  if (section) return `${section} - ${label}`
+
+  const name = el.getAttribute("name")
+  if (name?.startsWith("question[")) return name
+
+  if (el.id === "year" || el.id === "month" || el.id === "day") {
+    if (el.closest("#section-birthdate, [class*='birthdate']")) {
+      return `Date of birth - ${el.id}`
+    }
+  }
+
+  return label
 }
 
 function fieldFillKey(field: FormFieldDescriptor): string {
@@ -255,7 +278,7 @@ function getSelectOptions(select: HTMLSelectElement): Array<{ value: string; lab
 }
 
 function buildSelector(el: Element, index: number, label?: string): string {
-  if (label && /^Row \d+ -/.test(label)) {
+  if (label && (label.includes(" - ") || /^Row \d+ -/.test(label))) {
     el.setAttribute("data-agentman-field-key", label)
     return `[data-agentman-field-key="${escapeAttrValue(label)}"]`
   }
@@ -339,7 +362,7 @@ function findLabel(el: Element, container?: HTMLElement | null): string | undefi
   const id = el.getAttribute("id")
   if (id) {
     const label = document.querySelector(`label[for="${CSS.escape(id)}"]`)
-    if (label?.textContent?.trim()) return label.textContent.trim()
+    if (label?.textContent?.trim()) return cleanFieldLabel(label.textContent)
   }
 
   const root = container ?? findFieldContainer(el)
@@ -347,27 +370,142 @@ function findLabel(el: Element, container?: HTMLElement | null): string | undefi
     const combobox = root.querySelector("[role='combobox']")
     if (combobox?.id) {
       const label = document.querySelector(`label[for="${CSS.escape(combobox.id)}"]`)
-      if (label?.textContent?.trim()) return label.textContent.trim()
+      if (label?.textContent?.trim()) return cleanFieldLabel(label.textContent)
     }
 
     const containerLabel = root.querySelector("label[data-slot='label'], label")
     if (containerLabel?.textContent?.trim()) {
-      return containerLabel.textContent.trim()
+      return cleanFieldLabel(containerLabel.textContent)
     }
   }
 
   const parentLabel = el.closest("label")
   if (parentLabel?.textContent?.trim()) {
-    return parentLabel.textContent.trim()
+    return cleanFieldLabel(parentLabel.textContent)
   }
 
   const aria = el.getAttribute("aria-label")
-  if (aria) return aria
+  if (aria) return cleanFieldLabel(aria)
 
   const placeholder = el.getAttribute("placeholder")
-  if (placeholder) return placeholder
+  if (placeholder) return cleanFieldLabel(placeholder)
 
   return undefined
+}
+
+export function detectAddEntrySections(
+  root: Document | Element = document
+): AddEntrySectionDescriptor[] {
+  const sections: AddEntrySectionDescriptor[] = []
+  const seen = new Set<string>()
+
+  root.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
+    const addLabel = btn.textContent?.replace(/\s+/g, " ").trim() ?? ""
+    if (!/\badd\b/i.test(addLabel)) return
+    if (btn.type === "submit") return
+
+    const form = findFormForAddButton(btn)
+    if (!form) return
+
+    const submit = form.querySelector<HTMLButtonElement | HTMLInputElement>(
+      'button[type="submit"], input[type="submit"]'
+    )
+    if (!submit) return
+
+    const sectionLabel = findSectionLabel(form) ?? inferLabelFromAddButton(addLabel)
+    const formSelector = buildFormSelector(form)
+    const key = `${sectionLabel}|${formSelector}`
+    if (seen.has(key)) return
+    seen.add(key)
+
+    const fields = detectFormFields(form)
+    const fieldLabels = fields.map((f) => f.label).filter((l): l is string => !!l?.trim())
+    const cancelBtn = findCancelButton(form)
+
+    sections.push({
+      sectionLabel,
+      addButtonSelector: buildButtonSelector(btn),
+      addButtonLabel: addLabel,
+      formSelector,
+      submitSelector: `${formSelector} button[type="submit"], ${formSelector} input[type="submit"]`,
+      cancelButtonSelector: cancelBtn ? buildButtonSelector(cancelBtn) : undefined,
+      fieldLabels,
+      entryCount: countSectionEntries(btn, form)
+    })
+  })
+
+  return sections
+}
+
+function findCancelButton(form: HTMLFormElement): HTMLButtonElement | null {
+  for (const btn of form.querySelectorAll<HTMLButtonElement>('button[type="button"]')) {
+    if (/\bcancel\b/i.test(btn.textContent ?? "")) return btn
+  }
+  return null
+}
+
+function inferLabelFromAddButton(addLabel: string): string {
+  return addLabel.replace(/^add\s+/i, "").trim() || addLabel
+}
+
+function findFormForAddButton(btn: HTMLButtonElement): HTMLFormElement | null {
+  const section = btn.closest("section, [id^='section-']")
+  if (section) {
+    const inSection = section.querySelector("form")
+    if (inSection instanceof HTMLFormElement) return inSection
+  }
+
+  let sibling: Element | null = btn.parentElement?.nextElementSibling ?? null
+  while (sibling) {
+    if (sibling instanceof HTMLFormElement) return sibling
+    const nested = sibling.querySelector("form")
+    if (nested instanceof HTMLFormElement) return nested
+    sibling = sibling.nextElementSibling
+  }
+
+  const parent = btn.closest("section, div, main, article")
+  const nested = parent?.querySelector("form")
+  return nested instanceof HTMLFormElement ? nested : null
+}
+
+function buildFormSelector(form: HTMLFormElement): string {
+  if (form.id) return `#${CSS.escape(form.id)}`
+  const dataType = form.getAttribute("data-type")
+  if (dataType) return `form[data-type="${CSS.escape(dataType)}"]`
+  const name = form.getAttribute("name")
+  if (name) return `form[name="${CSS.escape(name)}"]`
+  return "form"
+}
+
+function buildButtonSelector(btn: HTMLButtonElement): string {
+  if (btn.id) return `#${CSS.escape(btn.id)}`
+
+  const form = btn.closest("form")
+  const formPrefix = form ? `${buildFormSelector(form)} ` : ""
+
+  if (btn.classList.contains("btn-cancel")) {
+    const skillType = btn.getAttribute("data-skilltype")
+    if (skillType) {
+      return `${formPrefix}button.btn-cancel[data-skilltype="${CSS.escape(skillType)}"]`
+    }
+    return `${formPrefix}button.btn-cancel`
+  }
+
+  const onclick = btn.getAttribute("onclick")
+  if (onclick) {
+    const snippet = onclick.slice(0, 40).replace(/"/g, '\\"')
+    return `button[onclick*="${snippet}"]`
+  }
+
+  return `${formPrefix}button`.trim()
+}
+
+function countSectionEntries(btn: Element, form: HTMLFormElement): number {
+  const section = btn.closest("section, [id^='section-']") ?? form.parentElement
+  if (!section) return 0
+  return section.querySelectorAll(
+    ".divtable-row, tr[data-row], [class*='-row'], tbody tr"
+  ).length
 }
 
 const APPLY_ORDER: Record<string, number> = {

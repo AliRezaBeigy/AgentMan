@@ -35,6 +35,8 @@ export interface AppSettings {
   assistModel: string
   theme: "light" | "dark"
   maxAgentIterations: number
+  /** Keep model loaded between agent steps for KV prefix cache (e.g. "30m", -1). */
+  ollamaKeepAlive: string | number
 }
 
 export interface FormFieldDescriptor {
@@ -70,12 +72,25 @@ export interface RepeatableSectionDescriptor {
   rowCount: number
 }
 
+/** Forms that use an Add button → sub-form → submit pattern (any site). */
+export interface AddEntrySectionDescriptor {
+  sectionLabel: string
+  addButtonSelector: string
+  addButtonLabel: string
+  formSelector: string
+  submitSelector: string
+  cancelButtonSelector?: string
+  fieldLabels: string[]
+  entryCount: number
+}
+
 export interface PageContext {
   url: string
   title: string
   textSummary: string
   fields: FormFieldDescriptor[]
   repeatableSections: RepeatableSectionDescriptor[]
+  addEntrySections: AddEntrySectionDescriptor[]
   viewport: ViewportInfo
 }
 
@@ -106,5 +121,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   agentModel: "",
   assistModel: "",
   theme: "dark",
-  maxAgentIterations: 30
+  maxAgentIterations: 30,
+  ollamaKeepAlive: "30m"
 }

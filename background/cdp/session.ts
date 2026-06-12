@@ -117,6 +117,48 @@ export class CdpSession {
     return result.objectId ?? null
   }
 
+  async evaluateBoolean(expression: string): Promise<boolean> {
+    const value = await this.evaluateJson<boolean>(expression)
+    return value === true
+  }
+
+  async evaluateJson<T>(expression: string): Promise<T | null> {
+    const { result } = await this.send<{ result: { value?: T } }>("Runtime.evaluate", {
+      expression,
+      returnByValue: true
+    })
+    return result.value ?? null
+  }
+
+  async clickSelectorDom(selector: string): Promise<void> {
+    const objectId = await this.queryObjectId(selector)
+    if (!objectId) throw new Error(`Element not found: ${selector}`)
+
+    await this.send("Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: `function() {
+        this.scrollIntoView({ block: "center", inline: "center" });
+        if (typeof this.click === "function") this.click();
+      }`
+    })
+  }
+
+  async waitUntil(
+    expression: string,
+    options: { timeoutMs?: number; intervalMs?: number } = {}
+  ): Promise<boolean> {
+    const timeoutMs = options.timeoutMs ?? 8000
+    const intervalMs = options.intervalMs ?? 200
+    const deadline = Date.now() + timeoutMs
+
+    while (Date.now() < deadline) {
+      if (await this.evaluateBoolean(expression)) return true
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    }
+
+    return false
+  }
+
   private async getElementRect(
     selector: string
   ): Promise<{ x: number; y: number; width: number; height: number } | null> {

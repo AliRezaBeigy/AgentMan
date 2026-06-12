@@ -3,6 +3,7 @@ import type { PlasmoCSConfig } from "plasmo"
 import {
   applyFieldMappings,
   clearHighlights,
+  detectAddEntrySections,
   detectFormFields,
   detectRepeatableSections,
   ensureRepeatableRows,
@@ -34,6 +35,7 @@ function buildPageContext(): PageContext {
     textSummary: getTextSummary(),
     fields: detectFormFields(),
     repeatableSections: detectRepeatableSections(),
+    addEntrySections: detectAddEntrySections(),
     viewport: {
       width: window.innerWidth,
       height: window.innerHeight,

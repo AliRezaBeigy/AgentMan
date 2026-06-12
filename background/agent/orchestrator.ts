@@ -1,3 +1,7 @@
+import {
+  compactToolResultForAgent,
+  formatAgentToolResultMessage
+} from "~/lib/agent-tool-messages"
 import { devLog, devLogError } from "~/lib/dev-log"
 import {
   buildFillInstruction,
@@ -11,15 +15,42 @@ import {
 } from "~/lib/fill-parse"
 import { buildPageContextNote, getLastUserMessage, pruneInvalidFillKeys } from "~/lib/fill-intent"
 import {
+  assistantTurnNeedsToolFollowUp,
+  buildAgentContinuationNudge,
+  buildAgentSystemPrompt,
+  buildPrematureDoneRejection,
+  estimateDelegatedAgentIterations,
+  filterFieldsForIntent,
+  shouldDelegateFillToAgent
+} from "~/lib/page-form-context"
+import {
   buildFlatRowKeyRetryMessage,
   detectDuplicateFlatKeysInRaw,
   getMaxRowIndexFromFillData,
   getRowColumnNames,
   normalizeFillResponse
 } from "~/lib/fill-rows"
+import {
+  buildAddEntryAdvanceMessage,
+  buildFillFieldsSignature,
+  findAddEntrySectionForFilledFields,
+  pickCssSelector,
+  type FilledFieldRef
+} from "~/lib/add-entry-workflow"
 import { extractRowFieldKeys } from "~/lib/fill-values"
-import { executeTool } from "~/background/tools/executor"
-import { chat, type OllamaMessage } from "~/lib/ollama/client"
+import { normalizeToolArguments, parseFillFieldsArg } from "~/lib/tool-args"
+import { submitAddEntryAndWait } from "~/background/add-entry-submit"
+import { waitForAddEntryFormClosed, waitForAddEntryFormReady } from "~/background/add-entry-wait"
+import { executeTool, type ToolResult } from "~/background/tools/executor"
+import { resolveAgentClickArgs } from "~/lib/add-entry-timing"
+import { chat, OllamaToolsNotSupportedError, type OllamaMessage } from "~/lib/ollama/client"
+import {
+  appendTextActionInstructions,
+  buildTextActionRetryMessage,
+  looksLikeFailedTextAction,
+  textActionNeedsFollowUp,
+  textActionToToolCalls
+} from "~/lib/text-actions"
 import { AGENT_TOOLS } from "~/lib/ollama/tools"
 import { expandSnippetsInText } from "~/lib/snippets"
 import { getSettings } from "~/lib/storage"
@@ -27,11 +58,17 @@ import { sendToPageTab } from "~/lib/tab-messaging"
 import { MessageType, type ChatHistoryEntry } from "~/lib/messages"
 import { buildStagedFilesContextNote } from "~/lib/staged-files"
 import type {
+  AddEntrySectionDescriptor,
   AgentState,
   ChatMode,
   PageContext,
   StagedFile
 } from "~/lib/types"
+
+export interface AgentLoopOptions {
+  addEntryMode?: boolean
+  ollamaKeepAlive?: string | number
+}
 
 export interface AgentContext {
   sessionId: string
@@ -49,6 +86,10 @@ class AgentController {
   private state: AgentState = { status: "idle", iteration: 0 }
   private abort = false
   private paused = false
+  private lastFillFieldsSignature: string | null = null
+  private addEntryCounts = new Map<string, number>()
+  /** Models that returned "does not support tools" — use JSON text actions instead. */
+  private readonly toolsSupportCache = new Map<string, boolean>()
 
   getState(): AgentState {
     return this.state
@@ -143,7 +184,9 @@ class AgentController {
         return
       }
 
-      await this.runAgentLoop(ctx, messages, model, settings.ollamaHost, settings.maxAgentIterations)
+      await this.runAgentLoop(ctx, messages, model, settings.ollamaHost, settings.maxAgentIterations, {
+        ollamaKeepAlive: settings.ollamaKeepAlive
+      })
     } catch (error) {
       devLogError("Agent run failed", error, { mode: ctx.mode, tabId: ctx.tabId })
       ctx.onError(error instanceof Error ? error.message : "Agent failed")
@@ -182,12 +225,45 @@ class AgentController {
     host: string,
     pageContext: PageContext
   ): Promise<void> {
-    const pageContextNote = buildPageContextNote(pageContext)
     const lastUserMessage = getLastUserMessage(messages)
+
+    if (shouldDelegateFillToAgent(pageContext, lastUserMessage)) {
+      devLog("Fill mode delegating to agent (multi-step Add-entry sections)", {
+        url: pageContext.url,
+        addEntrySections: pageContext.addEntrySections
+      })
+      const agentMessages: OllamaMessage[] = [
+        { role: "system", content: buildAgentSystemPrompt(pageContext, lastUserMessage) },
+        ...messages.filter((m) => m.role !== "system")
+      ]
+      const settings = await getSettings()
+      const iterationBudget = estimateDelegatedAgentIterations(
+        pageContext,
+        lastUserMessage,
+        settings.maxAgentIterations
+      )
+      devLog("Delegated agent iteration budget", { iterationBudget })
+      await this.runAgentLoop(ctx, agentMessages, model, host, iterationBudget, {
+        addEntryMode: true,
+        ollamaKeepAlive: settings.ollamaKeepAlive
+      })
+      return
+    }
+
+    const pageContextNote = buildPageContextNote(pageContext)
+    const scopedFields = filterFieldsForIntent(
+      pageContext.fields,
+      lastUserMessage,
+      pageContext.addEntrySections ?? []
+    )
+    const allFillableCount = getFillableFields(pageContext.fields).length
+    const useScopedFields =
+      scopedFields.length > 0 && scopedFields.length < allFillableCount
+    const targetFields = useScopedFields ? scopedFields : pageContext.fields
 
     const fillInstruction: OllamaMessage = {
       role: "system",
-      content: buildFillInstruction(pageContext.fields, pageContext.repeatableSections, {
+      content: buildFillInstruction(targetFields, pageContext.repeatableSections, {
         pageContextNote
       })
     }
@@ -195,10 +271,13 @@ class AgentController {
     devLog("Fill mode fields", {
       url: pageContext.url,
       count: pageContext.fields.length,
-      fields: pageContext.fields.map((f) => ({ selector: f.selector, label: f.label, type: f.type }))
+      scopedCount: scopedFields.length,
+      useScopedFields,
+      addEntrySections: pageContext.addEntrySections,
+      fields: targetFields.map((f) => ({ selector: f.selector, label: f.label, type: f.type }))
     })
 
-    let fillable = getFillableFields(pageContext.fields)
+    let fillable = getFillableFields(targetFields)
     let fillableCount = fillable.length
     let requiredKeys = fillable.map((f, i) => fieldFillKey(f, i))
 
@@ -421,9 +500,21 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     messages: OllamaMessage[],
     model: string,
     host: string,
-    maxIterations: number
+    maxIterations: number,
+    options: AgentLoopOptions = {}
   ): Promise<void> {
     let finalContent = ""
+    this.lastFillFieldsSignature = null
+    this.addEntryCounts.clear()
+    let continuationNudges = 0
+    const maxContinuationNudges = 12
+    let textActionMode = this.toolsSupportCache.get(model) === false
+    const keepAlive =
+      options.ollamaKeepAlive ?? (await getSettings()).ollamaKeepAlive
+
+    if (textActionMode) {
+      appendTextActionInstructions(messages)
+    }
 
     for (let i = 0; i < maxIterations; i++) {
       if (this.abort) break
@@ -440,36 +531,114 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       this.broadcastState()
 
       let stepContent = ""
-      const result = await chat({
-        host,
-        model,
-        messages,
-        tools: AGENT_TOOLS,
-        stream: true,
-        onChunk: (delta) => {
-          stepContent += delta
-          ctx.onStream(delta)
-        }
-      })
+      let result: Awaited<ReturnType<typeof chat>>
 
-      if (result.toolCalls.length === 0) {
-        finalContent = result.content || stepContent
+      try {
+        result = await chat({
+          host,
+          model,
+          messages,
+          tools: textActionMode ? undefined : AGENT_TOOLS,
+          stream: true,
+          keepAlive,
+          onChunk: (delta) => {
+            stepContent += delta
+            ctx.onStream(delta)
+          }
+        })
+        if (!textActionMode) {
+          this.toolsSupportCache.set(model, true)
+        }
+      } catch (error) {
+        if (!textActionMode && error instanceof OllamaToolsNotSupportedError) {
+          textActionMode = true
+          this.toolsSupportCache.set(model, false)
+          appendTextActionInstructions(messages)
+          devLog("Switching agent to text-action mode", { model, error: error.message })
+          ctx.onStream(
+            "\n\n*This model does not support tools — switching to JSON action mode.*\n\n"
+          )
+          i--
+          continue
+        }
+        throw error
+      }
+
+      const text = result.content || stepContent
+      const toolCalls = textActionMode
+        ? textActionToToolCalls(text)
+        : result.toolCalls.map((call) => ({
+            name: call.function.name,
+            args: normalizeToolArguments(call.function.arguments ?? {})
+          }))
+
+      if (!toolCalls.length) {
+        if (textActionMode && looksLikeFailedTextAction(text)) {
+          devLog("Text action parse failed", { text: text.slice(0, 200) })
+          messages.push({ role: "assistant", content: text })
+          messages.push({ role: "user", content: buildTextActionRetryMessage() })
+          continue
+        }
+
+        if (
+          options.addEntryMode &&
+          continuationNudges < maxContinuationNudges &&
+          (assistantTurnNeedsToolFollowUp(text) ||
+            (textActionMode && textActionNeedsFollowUp(text)))
+        ) {
+          continuationNudges++
+          devLog("Agent continuation nudge", { continuationNudges, text: text.slice(0, 120) })
+          messages.push({ role: "assistant", content: text })
+          messages.push({
+            role: "user",
+            content: textActionMode
+              ? `Return a JSON action object only. ${buildAgentContinuationNudge(this.addEntryCounts)}`
+              : buildAgentContinuationNudge(this.addEntryCounts)
+          })
+          continue
+        }
+        finalContent = text
         break
       }
 
-      if (i === 0 && (result.content || stepContent)) {
-        ctx.onStream(`\n\n**Plan:** ${result.content || stepContent}\n\n`)
+      if (textActionMode) {
+        devLog("Text action parsed", { calls: toolCalls })
       }
 
-      messages.push({
-        role: "assistant",
-        content: result.content || stepContent,
-      })
+      const doneCall = toolCalls.find((c) => c.name === "done")
+      if (doneCall) {
+        if (options.addEntryMode) {
+          const pageContext = await ctx.getPageContext()
+          const rejection = buildPrematureDoneRejection(
+            getLastUserMessage(messages),
+            this.addEntryCounts,
+            pageContext.addEntrySections ?? [],
+            pageContext.fields
+          )
+          if (rejection) {
+            devLog("Rejected premature done", {
+              counts: Object.fromEntries(this.addEntryCounts),
+              rejection: rejection.slice(0, 120)
+            })
+            messages.push({ role: "assistant", content: text })
+            messages.push({ role: "user", content: rejection })
+            continue
+          }
+        }
+        finalContent = String(doneCall.args.message ?? text)
+        break
+      }
 
-      for (const call of result.toolCalls) {
+      if (i === 0 && text && !textActionMode) {
+        ctx.onStream(`\n\n**Plan:** ${text}\n\n`)
+      }
+
+      messages.push({ role: "assistant", content: text })
+
+      for (const call of toolCalls) {
         if (this.abort) break
-        const toolName = call.function.name
-        const args = call.function.arguments ?? {}
+        const toolName = call.name
+        const args = call.args
         this.state = {
           status: "running",
           iteration: i + 1,
@@ -477,17 +646,23 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         }
         this.broadcastState()
 
-        const toolResult = await executeTool(ctx.tabId, toolName, args, {
-          getPageContext: ctx.getPageContext,
-          captureScreenshot: ctx.captureScreenshot,
-          resolveStagedFilePath: ctx.resolveStagedFilePath
+        const toolResult = await this.executeAgentTool(ctx, toolName, args, {
+          contentHint: textActionMode ? text : undefined
         })
 
-        messages.push({
-          role: "tool",
-          tool_name: toolName,
-          content: JSON.stringify(toolResult)
-        })
+        const compactResult = compactToolResultForAgent(toolName, toolResult)
+        if (textActionMode) {
+          messages.push({
+            role: "user",
+            content: formatAgentToolResultMessage(toolName, toolResult)
+          })
+        } else {
+          messages.push({
+            role: "tool",
+            tool_name: toolName,
+            content: JSON.stringify(compactResult)
+          })
+        }
       }
     }
 
@@ -497,6 +672,266 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     }
 
     ctx.onDone(finalContent || "Task completed.")
+  }
+
+  private async executeAgentTool(
+    ctx: AgentContext,
+    toolName: string,
+    args: Record<string, unknown>,
+    options: { contentHint?: string } = {}
+  ): Promise<ToolResult> {
+    const toolContext = {
+      getPageContext: ctx.getPageContext,
+      captureScreenshot: ctx.captureScreenshot,
+      resolveStagedFilePath: ctx.resolveStagedFilePath
+    }
+
+    if (toolName === "click") {
+      const pageContext = await ctx.getPageContext()
+      const sections = pageContext.addEntrySections ?? []
+      const resolved = resolveAgentClickArgs(args, sections, options.contentHint ?? "")
+      const clickTarget = resolved.clickTarget
+
+      if (resolved.selector !== String(args.selector ?? "")) {
+        devLog("Resolved add-entry click selector", {
+          from: args.selector ?? args.section,
+          to: resolved.selector
+        })
+      }
+
+      if (clickTarget?.kind === "open") {
+        await this.closeOtherAddEntrySections(
+          ctx,
+          clickTarget.section,
+          sections,
+          toolContext
+        )
+      }
+
+      const clickArgs = { ...args, selector: resolved.selector }
+      let toolResult = await executeTool(ctx.tabId, toolName, clickArgs, toolContext)
+
+      if (!toolResult.ok && clickTarget?.kind === "open") {
+        const addSelector = pickCssSelector(clickTarget.section.addButtonSelector)
+        if (addSelector !== resolved.selector) {
+          devLog("Retrying add-entry click with canonical Add button", { selector: addSelector })
+          toolResult = await executeTool(ctx.tabId, toolName, { selector: addSelector }, toolContext)
+        }
+      }
+
+      if (!toolResult.ok) return toolResult
+      if (!clickTarget) return toolResult
+
+      if (clickTarget.kind === "open") {
+        let ready = await waitForAddEntryFormReady(ctx.tabId, clickTarget.section)
+        const addSelector = pickCssSelector(clickTarget.section.addButtonSelector)
+
+        if (!ready) {
+          await this.closeOtherAddEntrySections(
+            ctx,
+            clickTarget.section,
+            sections,
+            toolContext
+          )
+          devLog("Retrying add-entry open with Add button", { selector: addSelector })
+          const retryResult = await executeTool(
+            ctx.tabId,
+            toolName,
+            { selector: addSelector },
+            toolContext
+          )
+          if (retryResult.ok) {
+            ready = await waitForAddEntryFormReady(ctx.tabId, clickTarget.section)
+          }
+        }
+
+        return {
+          ...toolResult,
+          ok: ready,
+          error: ready
+            ? undefined
+            : `${clickTarget.section.sectionLabel} form did not open — click Open: ${addSelector}`,
+          result: {
+            ...(typeof toolResult.result === "object" && toolResult.result
+              ? (toolResult.result as Record<string, unknown>)
+              : {}),
+            addEntryWait: {
+              formReady: ready,
+              section: clickTarget.section.sectionLabel,
+              clicked: String(clickArgs.selector ?? ""),
+              openSelector: addSelector
+            }
+          }
+        }
+      }
+
+      const closed = await waitForAddEntryFormClosed(ctx.tabId, clickTarget.section)
+      return {
+        ...toolResult,
+        result: {
+          ...(typeof toolResult.result === "object" && toolResult.result
+            ? (toolResult.result as Record<string, unknown>)
+            : {}),
+          addEntryWait: { formClosed: closed, section: clickTarget.section.sectionLabel }
+        }
+      }
+    }
+
+    if (toolName !== "fill_fields") {
+      return executeTool(ctx.tabId, toolName, args, toolContext)
+    }
+
+    const fields = parseFillFieldsArg(args.fields)
+    const pageContextBeforeFill = await ctx.getPageContext()
+    const fillSection = findAddEntrySectionForFilledFields(
+      fields,
+      pageContextBeforeFill
+    )
+    if (fillSection) {
+      const ready = await waitForAddEntryFormReady(ctx.tabId, fillSection)
+      if (!ready) {
+        return {
+          ok: false,
+          error: `${fillSection.sectionLabel} form is not open — click Open: ${pickCssSelector(fillSection.addButtonSelector)}`,
+          result: { filled: 0, results: [], formReady: false }
+        }
+      }
+    }
+
+    const signature = buildFillFieldsSignature(fields)
+    const isDuplicate =
+      signature.length > 2 &&
+      signature === this.lastFillFieldsSignature &&
+      this.lastFillFieldsSignature !== null
+
+    let toolResult: ToolResult
+    if (isDuplicate) {
+      devLog("Agent skipped duplicate fill_fields", { signature })
+      toolResult = {
+        ok: true,
+        result: {
+          filled: 0,
+          skipped: true,
+          reason: "Same values were already filled — advancing to save and open the next entry."
+        }
+      }
+    } else {
+      this.lastFillFieldsSignature = signature
+      toolResult = await executeTool(ctx.tabId, toolName, args, toolContext)
+    }
+
+    const pageContext = await ctx.getPageContext()
+    const advance = await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
+    if (advance) {
+      toolResult = {
+        ...toolResult,
+        ok: toolResult.ok && advance.submitted,
+        result: {
+          ...(typeof toolResult.result === "object" && toolResult.result
+            ? (toolResult.result as Record<string, unknown>)
+            : {}),
+          addEntry: advance
+        }
+      }
+    }
+
+    return toolResult
+  }
+
+  private async closeOtherAddEntrySections(
+    ctx: AgentContext,
+    targetSection: AddEntrySectionDescriptor,
+    sections: AddEntrySectionDescriptor[],
+    toolContext: {
+      getPageContext: () => Promise<PageContext>
+      captureScreenshot: () => Promise<string>
+      resolveStagedFilePath: (fileId: string) => Promise<string | null>
+    }
+  ): Promise<void> {
+    for (const section of sections) {
+      if (section.sectionLabel === targetSection.sectionLabel) continue
+      if (!section.cancelButtonSelector) continue
+
+      const open = await waitForAddEntryFormReady(ctx.tabId, section, 400)
+      if (!open) continue
+
+      devLog("Closing other add-entry section before switch", {
+        closing: section.sectionLabel,
+        opening: targetSection.sectionLabel
+      })
+      await executeTool(
+        ctx.tabId,
+        "click",
+        { selector: pickCssSelector(section.cancelButtonSelector) },
+        toolContext
+      )
+      await waitForAddEntryFormClosed(ctx.tabId, section, 4000)
+      await sleep(300)
+    }
+  }
+
+  private async advanceAddEntryAfterFill(
+    ctx: AgentContext,
+    fields: FilledFieldRef[],
+    pageContext: PageContext,
+    toolContext: {
+      getPageContext: () => Promise<PageContext>
+      captureScreenshot: () => Promise<string>
+      resolveStagedFilePath: (fileId: string) => Promise<string | null>
+    }
+  ): Promise<{
+    submitted: boolean
+    openedNext: boolean
+    sectionLabel: string
+    entryNumber: number
+    nextStep: string
+    error?: string
+  } | null> {
+    const section = findAddEntrySectionForFilledFields(fields, pageContext)
+    if (!section) return null
+
+    const submitSelector = pickCssSelector(section.submitSelector)
+    devLog("Add-entry auto advance", { section: section.sectionLabel, submitSelector })
+
+    const submitOutcome = await submitAddEntryAndWait(ctx.tabId, section)
+    if (!submitOutcome.submitted || !submitOutcome.formClosed) {
+      return {
+        submitted: false,
+        openedNext: false,
+        sectionLabel: section.sectionLabel,
+        entryNumber: this.addEntryCounts.get(section.sectionLabel) ?? 0,
+        nextStep: submitOutcome.validationErrors.length
+          ? `Call fill_fields again with valid values for: ${submitOutcome.validationErrors.join("; ")}`
+          : `Click submit to save: ${submitSelector}`,
+        error: submitOutcome.error
+      }
+    }
+
+    const openResult = await executeTool(
+      ctx.tabId,
+      "click",
+      { selector: section.addButtonSelector },
+      toolContext
+    )
+
+    const formReady = openResult.ok
+      ? await waitForAddEntryFormReady(ctx.tabId, section)
+      : false
+
+    const entryNumber = (this.addEntryCounts.get(section.sectionLabel) ?? 0) + 1
+    this.addEntryCounts.set(section.sectionLabel, entryNumber)
+    this.lastFillFieldsSignature = null
+
+    return {
+      submitted: true,
+      openedNext: openResult.ok && formReady,
+      sectionLabel: section.sectionLabel,
+      entryNumber,
+      nextStep: formReady
+        ? buildAddEntryAdvanceMessage(section, entryNumber)
+        : `Click ${section.addButtonLabel} and wait for the form fields to appear before filling.`,
+      error: openResult.ok && !formReady ? "Add clicked but the form did not open in time." : undefined
+    }
   }
 }
 
@@ -509,7 +944,7 @@ function buildSystemPrompt(mode: ChatMode, pageContext: PageContext): string {
     const contextNote = buildPageContextNote(pageContext, 1200)
     return `${base} You fill web forms by returning JSON values for each field key provided in the instructions.${contextNote}`
   }
-  return `${base} Use tools to complete multi-step browser tasks. Ask before submit/delete when uncertain.`
+  return buildAgentSystemPrompt(pageContext)
 }
 
 function sleep(ms: number): Promise<void> {
