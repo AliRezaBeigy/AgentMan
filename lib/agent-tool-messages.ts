@@ -101,6 +101,9 @@ export function formatCompactAgentToolResultMessage(
   }
   if (toolName === "click") {
     const wait = compact.addEntryWait as Record<string, unknown> | undefined
+    if (wait?.alreadyOpen && wait?.section) {
+      return `${wait.section} form already open — use fill_fields, do not click Add again.`
+    }
     if (wait?.section) return `Opened ${wait.section}.`
     return compact.ok ? "Click ok." : `Click failed: ${compact.error ?? "unknown"}`
   }

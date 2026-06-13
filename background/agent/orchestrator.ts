@@ -52,6 +52,7 @@ import { extractRowFieldKeys } from "~/lib/fill-values"
 import { normalizeToolArguments, parseFillFieldsArg } from "~/lib/tool-args"
 import { submitAddEntryAndWait } from "~/background/add-entry-submit"
 import { waitForAddEntryFormClosed, waitForAddEntryFormReady } from "~/background/add-entry-wait"
+import { openAddEntrySection } from "~/lib/add-entry-open"
 import { executeTool, type ToolResult } from "~/background/tools/executor"
 import { resolveAgentClickArgs } from "~/lib/add-entry-timing"
 import { chat, ChatAbortedError, OllamaToolsNotSupportedError, type OllamaMessage } from "~/lib/ollama/client"
@@ -788,7 +789,11 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     ctx: AgentContext,
     messages: OllamaMessage[]
   ): Promise<void> {
-    let hint = buildAddEntryTurnHint(this.addEntryCounts, this.lastAgentToolName)
+    let hint = buildAddEntryTurnHint(
+      this.addEntryCounts,
+      this.lastAgentToolName,
+      this.openAddEntrySectionLabel
+    )
 
     const existingIndex = messages.findIndex(
       (message) =>
@@ -837,65 +842,56 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       }
 
       const clickArgs = { ...args, selector: resolved.selector }
-      let toolResult = await executeTool(ctx.tabId, toolName, clickArgs, toolContext)
 
-      if (!toolResult.ok && clickTarget?.kind === "open") {
+      if (clickTarget?.kind === "open") {
         const addSelector = pickCssSelector(clickTarget.section.addButtonSelector)
-        if (addSelector !== resolved.selector) {
-          devLog("Retrying add-entry click with canonical Add button", { selector: addSelector })
-          toolResult = await executeTool(ctx.tabId, toolName, { selector: addSelector }, toolContext)
-        }
-      }
-
-      if (!toolResult.ok) return toolResult
-      if (!clickTarget) return toolResult
-
-      if (clickTarget.kind === "open") {
-        let ready = await waitForAddEntryFormReady(ctx.tabId, clickTarget.section)
-        const addSelector = pickCssSelector(clickTarget.section.addButtonSelector)
-
-        if (!ready) {
-          await this.closeOtherAddEntrySections(
-            ctx,
-            clickTarget.section,
-            sections,
-            toolContext
-          )
-          devLog("Retrying add-entry open with Add button", { selector: addSelector })
-          const retryResult = await executeTool(
-            ctx.tabId,
-            toolName,
-            { selector: addSelector },
-            toolContext
-          )
-          if (retryResult.ok) {
-            ready = await waitForAddEntryFormReady(ctx.tabId, clickTarget.section)
+        const alreadyOpen = await waitForAddEntryFormReady(ctx.tabId, clickTarget.section, 500)
+        if (alreadyOpen) {
+          this.openAddEntrySectionLabel = clickTarget.section.sectionLabel
+          return {
+            ok: true,
+            result: {
+              clicked: false,
+              alreadyOpen: true,
+              addEntryWait: {
+                formReady: true,
+                alreadyOpen: true,
+                section: clickTarget.section.sectionLabel,
+                clicked: String(clickArgs.selector ?? ""),
+                openSelector: addSelector
+              }
+            }
           }
         }
 
-        if (ready) {
+        const opened = await openAddEntrySection(ctx.tabId, clickTarget.section)
+        if (opened) {
           this.openAddEntrySectionLabel = clickTarget.section.sectionLabel
+        } else {
+          this.openAddEntrySectionLabel = null
         }
 
         return {
-          ...toolResult,
-          ok: ready,
-          error: ready
+          ok: opened,
+          error: opened
             ? undefined
             : `${clickTarget.section.sectionLabel} form did not open — click Open: ${addSelector}`,
           result: {
-            ...(typeof toolResult.result === "object" && toolResult.result
-              ? (toolResult.result as Record<string, unknown>)
-              : {}),
+            clicked: opened,
             addEntryWait: {
-              formReady: ready,
+              formReady: opened,
               section: clickTarget.section.sectionLabel,
-              clicked: String(clickArgs.selector ?? ""),
+              clicked: addSelector,
               openSelector: addSelector
             }
           }
         }
       }
+
+      let toolResult = await executeTool(ctx.tabId, toolName, clickArgs, toolContext)
+
+      if (!toolResult.ok) return toolResult
+      if (!clickTarget) return toolResult
 
       const closed = await waitForAddEntryFormClosed(ctx.tabId, clickTarget.section)
       return {
@@ -1072,16 +1068,9 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       }
     }
 
-    const openResult = await executeTool(
-      ctx.tabId,
-      "click",
-      { selector: section.addButtonSelector },
-      toolContext
-    )
+    this.openAddEntrySectionLabel = null
 
-    const formReady = openResult.ok
-      ? await waitForAddEntryFormReady(ctx.tabId, section)
-      : false
+    const formReady = await openAddEntrySection(ctx.tabId, section)
 
     if (formReady) {
       this.openAddEntrySectionLabel = section.sectionLabel
@@ -1093,13 +1082,13 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
 
     return {
       submitted: true,
-      openedNext: openResult.ok && formReady,
+      openedNext: formReady,
       sectionLabel: section.sectionLabel,
       entryNumber,
       nextStep: formReady
         ? buildAddEntryAdvanceMessage(section, entryNumber)
         : `Click ${section.addButtonLabel} and wait for the form fields to appear before filling.`,
-      error: openResult.ok && !formReady ? "Add clicked but the form did not open in time." : undefined
+      error: formReady ? undefined : "Add clicked but the form did not open in time."
     }
   }
 }

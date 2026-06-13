@@ -304,25 +304,30 @@ export const ADD_ENTRY_TURN_HINT_PREFIX = "[Next step]"
 
 export function buildAddEntryTurnHint(
   addEntryCounts: ReadonlyMap<string, number>,
-  lastToolName: string | null
+  lastToolName: string | null,
+  openSectionLabel: string | null = null
 ): string {
   const workCount = addEntryCounts.get("Work experience") ?? 0
   const educationCount = addEntryCounts.get("Education") ?? 0
+
+  if (openSectionLabel) {
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} ${openSectionLabel} form is open. Return fill_fields with the NEXT ${openSectionLabel} item from the attachment — do NOT click Add again.`
+  }
 
   if (!lastToolName) {
     return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE JSON object only (not an array). First: {"action":"click","section":"Work experience"}`
   }
 
   if (lastToolName === "click") {
-    return `${ADD_ENTRY_TURN_HINT_PREFIX} Form open. Return fill_fields using work:* / edu:* aliases (or #id) with values from the attachment.`
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} Form open. Return fill_fields using work:* / edu:* aliases (or #id) with values from the attachment. Do NOT click Add again.`
   }
 
   if (lastToolName === "fill_fields") {
     if (workCount === 0) {
-      return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action: open Work experience or fill the next work entry from the attachment.`
+      return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action: {"action":"click","section":"Work experience"} then fill_fields for the first work entry.`
     }
     if (educationCount === 0) {
-      return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action: {"action":"click","section":"Education"} or fill the next work entry if more remain.`
+      return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action: {"action":"click","section":"Education"} or fill_fields for the next work entry if more remain.`
     }
     return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action for the next unsaved entry, or {"action":"done","message":"..."} when all items are saved.`
   }
