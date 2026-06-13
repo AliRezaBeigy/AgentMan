@@ -17,7 +17,11 @@ describe("compactToolResultForAgent", () => {
           openedNext: true,
           sectionLabel: "Work experience",
           entryNumber: 2,
-          nextStep: "Fill entry 2"
+          nextStep: "Fill entry 2",
+          entryAdded: true,
+          savedCount: 2,
+          sessionAdded: 1,
+          lastSavedSummary: "Engineer @ Acme"
         }
       }
     })
@@ -33,6 +37,10 @@ describe("compactToolResultForAgent", () => {
         sectionLabel: "Work experience",
         entryNumber: 2,
         nextStep: "Fill entry 2",
+        entryAdded: true,
+        savedCount: 2,
+        sessionAdded: 1,
+        lastSavedSummary: "Engineer @ Acme",
         error: undefined
       }
     })
@@ -56,15 +64,31 @@ describe("compactToolResultForAgent", () => {
     })
   })
 
-  it("replaces get_page_content fields with a note", () => {
+  it("returns saved entries note for get_page_content when sections present", () => {
     const compact = compactToolResultForAgent("get_page_content", {
       ok: true,
-      result: { fields: [{ selector: "#a" }, { selector: "#b" }], textSummary: "long text" }
+      result: {
+        addEntrySections: [
+          {
+            sectionLabel: "Work experience",
+            entryCount: 1,
+            savedEntries: [{ fingerprint: "a", summary: "Engineer @ Acme" }]
+          }
+        ]
+      }
+    })
+
+    expect(compact.note).toContain("Saved entries")
+    expect(compact.savedEntries).toContain("Work experience")
+  })
+
+  it("returns default note for get_page_content without add-entry sections", () => {
+    const compact = compactToolResultForAgent("get_page_content", {
+      ok: true,
+      result: { fields: [{ selector: "#a" }], textSummary: "long text" }
     })
 
     expect(compact.note).toContain("system prompt")
-    expect(compact).not.toHaveProperty("fields")
-    expect(compact).not.toHaveProperty("textSummary")
   })
 })
 

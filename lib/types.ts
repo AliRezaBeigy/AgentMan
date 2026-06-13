@@ -72,6 +72,14 @@ export interface RepeatableSectionDescriptor {
   rowCount: number
 }
 
+/** One saved entry row/card already on the page (not the add sub-form). */
+export interface AddEntrySavedEntry {
+  /** Stable identity: element id, or hash of normalized visible text */
+  fingerprint: string
+  /** Human-readable one-liner — visible text only */
+  summary: string
+}
+
 /** Forms that use an Add button → sub-form → submit pattern (any site). */
 export interface AddEntrySectionDescriptor {
   sectionLabel: string
@@ -82,6 +90,9 @@ export interface AddEntrySectionDescriptor {
   cancelButtonSelector?: string
   fieldLabels: string[]
   entryCount: number
+  savedEntries: AddEntrySavedEntry[]
+  /** Nearest list container holding saved rows — dev/debug only */
+  entriesListSelector?: string
 }
 
 export interface PageContext {

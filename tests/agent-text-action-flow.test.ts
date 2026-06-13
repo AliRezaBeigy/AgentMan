@@ -48,7 +48,8 @@ const pageContext: PageContext = {
       submitSelector: "#add-cvjob button[type='submit']",
       cancelButtonSelector: "#add-cvjob button.btn-cancel",
       fieldLabels: ["Work experience - Title", "Work experience - Employer"],
-      entryCount: 0
+      entryCount: 0,
+      savedEntries: []
     }
   ],
   viewport: { width: 1280, height: 800, scrollX: 0, scrollY: 0 }

@@ -76,9 +76,6 @@ export class CdpSession {
         } else {
           this.value = value;
         }
-        if (typeof this.setCustomValidity === 'function') this.setCustomValidity('');
-        const form = this.closest('form');
-        if (form) form.noValidate = true;
         this.dispatchEvent(new Event('input', { bubbles: true }));
         this.dispatchEvent(new Event('change', { bubbles: true }));
       }`,
@@ -112,9 +109,6 @@ export class CdpSession {
               } else {
                 el.value = value;
               }
-              if (typeof el.setCustomValidity === "function") el.setCustomValidity("");
-              const form = el.closest("form");
-              if (form) form.noValidate = true;
               el.dispatchEvent(new Event("input", { bubbles: true }));
               el.dispatchEvent(new Event("change", { bubbles: true }));
               results.push({ selector: item.selector, ok: true });

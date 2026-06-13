@@ -31,7 +31,8 @@ const pageContext: PageContext = {
       submitSelector: "#experience-form button[type='submit']",
       cancelButtonSelector: "#experience-form .btn-cancel",
       fieldLabels: ["Work experience - Title", "Work experience - Employer"],
-      entryCount: 0
+      entryCount: 0,
+      savedEntries: []
     },
     {
       sectionLabel: "Language",
@@ -40,7 +41,8 @@ const pageContext: PageContext = {
       formSelector: "#language-form",
       submitSelector: "#language-form button[type='submit']",
       fieldLabels: [],
-      entryCount: 0
+      entryCount: 0,
+      savedEntries: []
     }
   ],
   viewport: { width: 1280, height: 800, scrollX: 0, scrollY: 0 }
@@ -81,7 +83,12 @@ describe("page-form-context", () => {
     )
   })
 
-  it("rejects done when targeted sections have no saved entries", () => {
+  it("rejects done when targeted sections have no saved entries on page", () => {
+    const workWithSaved = {
+      ...pageContext.addEntrySections[0],
+      entryCount: 1,
+      savedEntries: [{ fingerprint: "w1", summary: "Engineer @ Acme" }]
+    }
     const educationSection = {
       sectionLabel: "Education",
       addButtonSelector: "#add-education",
@@ -89,9 +96,10 @@ describe("page-form-context", () => {
       formSelector: "#education-form",
       submitSelector: "#education-form button[type='submit']",
       fieldLabels: ["Education - Title"],
-      entryCount: 0
+      entryCount: 0,
+      savedEntries: []
     }
-    const sections = [...pageContext.addEntrySections, educationSection]
+    const sections = [workWithSaved, educationSection]
     const counts = new Map([["Work experience", 1]])
 
     const rejection = buildPrematureDoneRejection(

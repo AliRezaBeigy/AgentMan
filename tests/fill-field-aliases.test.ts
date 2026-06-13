@@ -13,7 +13,8 @@ const workFields: FormFieldDescriptor[] = [
     type: "text",
     id: "cvjob-position",
     selector: '[data-agentman-field-key="Work experience - Title"]',
-    label: "Work experience - Title"
+    label: "Work experience - Title",
+    required: true
   },
   {
     tag: "input",
@@ -36,7 +37,9 @@ const pageContext: PageContext = {
       addButtonLabel: "Add",
       formSelector: "#add-cvjob",
       submitSelector: "#add-cvjob button[type='submit']",
-      fieldLabels: workFields.map((f) => f.label!)
+      fieldLabels: workFields.map((f) => f.label!),
+      entryCount: 0,
+      savedEntries: []
     }
   ]
 }
@@ -44,7 +47,7 @@ const pageContext: PageContext = {
 describe("fill-field-aliases", () => {
   it("builds compact aliases for prompt", () => {
     const { promptBlock, aliasToSelector } = buildFillFieldAliasRegistry(pageContext)
-    expect(promptBlock).toContain("work:title;text")
+    expect(promptBlock).toContain("work:title;text;REQUIRED")
     expect(promptBlock).toContain("work:employer;text")
     expect(aliasToSelector.get("work:title")).toBe(workFields[0].selector)
     expect(aliasToSelector.get("#cvjob-company")).toBe(workFields[1].selector)

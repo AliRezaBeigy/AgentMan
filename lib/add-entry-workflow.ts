@@ -54,6 +54,22 @@ export function pickCssSelector(selectorList: string): string {
   return selectorList.split(",")[0]?.trim() ?? selectorList
 }
 
+export function buildPostFillValueMap(
+  sectionFields: FormFieldDescriptor[],
+  filledFields: FilledFieldRef[]
+): Map<string, string> {
+  const values = new Map<string, string>()
+  for (const field of sectionFields) {
+    values.set(field.selector, field.value ?? "")
+  }
+  for (const filled of filledFields) {
+    if (filled.value !== undefined) {
+      values.set(filled.selector, filled.value)
+    }
+  }
+  return values
+}
+
 export function buildFillFieldsSignature(fields: FilledFieldRef[]): string {
   return JSON.stringify(
     fields

@@ -1,6 +1,8 @@
 import { cleanFieldLabel } from "~/lib/field-labels"
 import { findSectionLabel } from "~/lib/field-sections"
+import { detectFieldRequired } from "~/lib/required-field-detect"
 import type {
+  AddEntrySavedEntry,
   AddEntrySectionDescriptor,
   FormFieldDescriptor,
   RepeatableSectionDescriptor
@@ -45,7 +47,7 @@ export function detectFormFields(root: Document | Element = document): FormField
         label,
         value: el.value,
         options,
-        required: el.required,
+        required: detectFieldRequired(el, label),
         widget: combobox ? "combobox" : undefined,
         triggerSelector: triggerId ? `#${CSS.escape(triggerId)}` : undefined
       })
@@ -62,7 +64,7 @@ export function detectFormFields(root: Document | Element = document): FormField
         label,
         placeholder: el.placeholder || undefined,
         value: el.value,
-        required: el.required
+        required: detectFieldRequired(el, label)
       })
       return
     }
@@ -77,7 +79,7 @@ export function detectFormFields(root: Document | Element = document): FormField
         label,
         placeholder: el.placeholder || undefined,
         value: el.type === "checkbox" ? String(el.checked) : el.value,
-        required: el.required,
+        required: detectFieldRequired(el, label),
         isFileInput: el.type === "file",
         accept: el.accept || undefined
       })
@@ -422,6 +424,9 @@ export function detectAddEntrySections(
     const fieldLabels = fields.map((f) => f.label).filter((l): l is string => !!l?.trim())
     const cancelBtn = findCancelButton(form)
 
+    const sectionRoot = findAddEntrySectionRoot(btn, form)
+    const saved = detectSavedAddEntryEntries(sectionRoot, form)
+
     sections.push({
       sectionLabel,
       addButtonSelector: buildButtonSelector(btn),
@@ -430,7 +435,9 @@ export function detectAddEntrySections(
       submitSelector: `${formSelector} button[type="submit"], ${formSelector} input[type="submit"]`,
       cancelButtonSelector: cancelBtn ? buildButtonSelector(cancelBtn) : undefined,
       fieldLabels,
-      entryCount: countSectionEntries(btn, form)
+      entryCount: saved.entries.length,
+      savedEntries: saved.entries,
+      entriesListSelector: saved.listSelector
     })
   })
 
@@ -500,12 +507,101 @@ function buildButtonSelector(btn: HTMLButtonElement): string {
   return `${formPrefix}button`.trim()
 }
 
-function countSectionEntries(btn: Element, form: HTMLFormElement): number {
-  const section = btn.closest("section, [id^='section-']") ?? form.parentElement
-  if (!section) return 0
-  return section.querySelectorAll(
-    ".divtable-row, tr[data-row], [class*='-row'], tbody tr"
-  ).length
+function findAddEntrySectionRoot(btn: Element, form: HTMLFormElement): Element {
+  return btn.closest("section, [id^='section-']") ?? form.parentElement ?? form
+}
+
+const SAVED_ENTRY_ROW_SELECTORS = [
+  ".divtable-row",
+  "tr[data-row]",
+  "tbody tr",
+  "li"
+] as const
+
+function isExcludedSavedEntryElement(el: Element, form: HTMLFormElement): boolean {
+  if (form.contains(el)) return true
+  if (el.closest(".hidden, [hidden], [aria-hidden='true']")) return true
+  const id = el.id ?? el.closest("[id]")?.id ?? ""
+  if (/template/i.test(id)) return true
+  if (el.classList.contains("divtable-head")) return true
+  if (el.matches("thead, thead tr, th")) return true
+  if (el.matches("button, input, select, textarea")) return true
+  return false
+}
+
+function normalizeSavedEntryText(el: Element): string {
+  const text = (el as HTMLElement).innerText?.replace(/\s+/g, " ").trim() ?? ""
+  return text.slice(0, 120)
+}
+
+function hashSavedEntryText(text: string): string {
+  let hash = 0
+  for (let i = 0; i < text.length; i++) {
+    hash = (Math.imul(31, hash) + text.charCodeAt(i)) | 0
+  }
+  return `h${Math.abs(hash)}`
+}
+
+function dedupeNestedSavedEntryRows(rows: Element[]): Element[] {
+  return rows.filter(
+    (row) => !rows.some((other) => other !== row && other.contains(row))
+  )
+}
+
+export function findSavedEntryElements(
+  sectionRoot: Element,
+  form: HTMLFormElement
+): Element[] {
+  const candidates = new Set<Element>()
+
+  for (const selector of SAVED_ENTRY_ROW_SELECTORS) {
+    sectionRoot.querySelectorAll(selector).forEach((el) => {
+      if (!isExcludedSavedEntryElement(el, form)) candidates.add(el)
+    })
+  }
+
+  sectionRoot.querySelectorAll("[class*='-row']").forEach((el) => {
+    if (!isExcludedSavedEntryElement(el, form)) candidates.add(el)
+  })
+
+  return dedupeNestedSavedEntryRows(Array.from(candidates)).filter((el) => {
+    const summary = normalizeSavedEntryText(el)
+    return summary.length > 0
+  })
+}
+
+function buildEntriesListSelector(rows: Element[]): string | undefined {
+  if (!rows.length) return undefined
+  const first = rows[0]
+  const list =
+    first.closest(".divtable-body, [class*='-list'], ul, ol, tbody, table") ??
+    first.parentElement
+  if (!list || list === document.body) return undefined
+  if (list.id) return `#${CSS.escape(list.id)}`
+  return undefined
+}
+
+export function detectSavedAddEntryEntries(
+  sectionRoot: Element,
+  form: HTMLFormElement
+): { entries: AddEntrySavedEntry[]; listSelector?: string } {
+  const rows = findSavedEntryElements(sectionRoot, form)
+  const entries: AddEntrySavedEntry[] = []
+  const seen = new Set<string>()
+
+  for (const row of rows) {
+    const summary = normalizeSavedEntryText(row)
+    if (!summary) continue
+    const fingerprint = row.id?.trim() || hashSavedEntryText(summary)
+    if (seen.has(fingerprint)) continue
+    seen.add(fingerprint)
+    entries.push({ fingerprint, summary })
+  }
+
+  return {
+    entries,
+    listSelector: buildEntriesListSelector(rows)
+  }
 }
 
 const APPLY_ORDER: Record<string, number> = {

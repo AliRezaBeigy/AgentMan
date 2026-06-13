@@ -38,10 +38,16 @@ import {
 import {
   buildAddEntryAdvanceMessage,
   buildFillFieldsSignature,
+  buildPostFillValueMap,
   findAddEntrySectionForFilledFields,
   pickCssSelector,
   type FilledFieldRef
 } from "~/lib/add-entry-workflow"
+import {
+  diffSavedEntries,
+  formatLastSavedSummary,
+  getSectionSavedCount
+} from "~/lib/add-entry-saved-rows"
 import { buildFillFieldAliasRegistry } from "~/lib/fill-field-aliases"
 import {
   getSectionFillableFields,
@@ -50,6 +56,10 @@ import {
 } from "~/lib/fill-selector-resolve"
 import { extractRowFieldKeys } from "~/lib/fill-values"
 import { normalizeToolArguments, parseFillFieldsArg } from "~/lib/tool-args"
+import {
+  buildMissingRequiredMessage,
+  getMissingRequiredFields
+} from "~/lib/required-field-detect"
 import { submitAddEntryAndWait } from "~/background/add-entry-submit"
 import { waitForAddEntryFormClosed, waitForAddEntryFormReady } from "~/background/add-entry-wait"
 import { openAddEntrySection } from "~/lib/add-entry-open"
@@ -106,6 +116,9 @@ class AgentController {
   private paused = false
   private lastFillFieldsSignature: string | null = null
   private addEntryCounts = new Map<string, number>()
+  private addEntryBaselineCounts = new Map<string, number>()
+  private addEntrySessionCounts = new Map<string, number>()
+  private addEntrySectionsSnapshot: AddEntrySectionDescriptor[] = []
   private lastAgentToolName: string | null = null
   private openAddEntrySectionLabel: string | null = null
   private fieldAliasMap: Map<string, string> | null = null
@@ -174,7 +187,6 @@ class AgentController {
     }
 
     try {
-      await chrome.tabs.sendMessage(ctx.tabId, { type: MessageType.SUPPRESS_PAGE_VALIDATION })
       await chrome.tabs.sendMessage(ctx.tabId, { type: MessageType.HIDE_UI_FOR_SCREENSHOT })
     } catch {
       /* content script may not be ready */
@@ -219,8 +231,7 @@ class AgentController {
       ctx.onError(errMsg)
     } finally {
       try {
-        await chrome.tabs.sendMessage(ctx.tabId, { type: MessageType.RESTORE_PAGE_VALIDATION })
-        await chrome.tabs.sendMessage(ctx.tabId, { type: MessageType.HIDE_UI_FOR_SCREENSHOT })
+        await chrome.tabs.sendMessage(ctx.tabId, { type: MessageType.SHOW_UI_AFTER_SCREENSHOT })
       } catch {
         /* tab closed or content script unavailable */
       }
@@ -540,6 +551,9 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     let finalContent = ""
     this.lastFillFieldsSignature = null
     this.addEntryCounts.clear()
+    this.addEntryBaselineCounts.clear()
+    this.addEntrySessionCounts.clear()
+    this.addEntrySectionsSnapshot = []
     this.lastAgentToolName = null
     this.openAddEntrySectionLabel = null
     let continuationNudges = 0
@@ -547,6 +561,17 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     let textActionMode = this.toolsSupportCache.get(model) === false
     const keepAlive =
       options.ollamaKeepAlive ?? (await getSettings()).ollamaKeepAlive
+
+    if (options.addEntryMode) {
+      const initialContext = await ctx.getPageContext()
+      this.addEntrySectionsSnapshot = initialContext.addEntrySections ?? []
+      for (const section of this.addEntrySectionsSnapshot) {
+        const baseline = getSectionSavedCount(section)
+        this.addEntryBaselineCounts.set(section.sectionLabel, baseline)
+        this.addEntrySessionCounts.set(section.sectionLabel, 0)
+        this.addEntryCounts.set(section.sectionLabel, baseline)
+      }
+    }
 
     if (textActionMode) {
       appendTextActionInstructions(messages, Boolean(options.addEntryMode))
@@ -566,8 +591,8 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       }
       this.broadcastState()
 
-      if (options.addEntryMode && textActionMode) {
-        await this.injectAddEntryTurnHint(ctx, messages)
+      if (options.addEntryMode) {
+        await this.injectAddEntryTurnHint(ctx, messages, textActionMode)
       }
 
       let stepContent = ""
@@ -667,6 +692,19 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
             args: normalizeToolArguments(call.function.arguments ?? {})
           }))
 
+      let parsedTextActionFallback = false
+      if (!toolCalls.length && !textActionMode) {
+        const fallback = textActionToToolCalls(text)
+        if (fallback.length) {
+          parsedTextActionFallback = true
+          toolCalls = fallback
+          devLog("Parsed text action when native tool_calls were empty", {
+            text: text.slice(0, 120),
+            tool: fallback[0]?.name
+          })
+        }
+      }
+
       if (textActionMode && looksLikeActionArray(text)) {
         messages.push({ role: "assistant", content: '{"error":"action_array"}' })
         messages.push({ role: "user", content: buildMultiActionRejectionMessage() })
@@ -751,7 +789,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         this.broadcastState()
 
         const toolResult = await this.executeAgentTool(ctx, toolName, args, {
-          contentHint: textActionMode ? text : undefined,
+          contentHint: textActionMode || parsedTextActionFallback ? text : undefined,
           streamFilled: streamFilledSelectors
         })
 
@@ -787,12 +825,22 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
 
   private async injectAddEntryTurnHint(
     ctx: AgentContext,
-    messages: OllamaMessage[]
+    messages: OllamaMessage[],
+    textActionMode = false
   ): Promise<void> {
+    const pageContext = await ctx.getPageContext()
+    this.addEntrySectionsSnapshot = pageContext.addEntrySections ?? this.addEntrySectionsSnapshot
+    for (const section of this.addEntrySectionsSnapshot) {
+      this.addEntryCounts.set(section.sectionLabel, getSectionSavedCount(section))
+    }
+
     let hint = buildAddEntryTurnHint(
       this.addEntryCounts,
       this.lastAgentToolName,
-      this.openAddEntrySectionLabel
+      this.openAddEntrySectionLabel,
+      this.addEntrySectionsSnapshot,
+      this.addEntrySessionCounts,
+      textActionMode
     )
 
     const existingIndex = messages.findIndex(
@@ -980,10 +1028,44 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
 
     const pageContext = await ctx.getPageContext()
     const filledCount = extractFilledCountFromToolResult(toolResult)
-    const shouldAdvance = toolResult.ok && filledCount > 0
-    const advance = shouldAdvance
-      ? await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
-      : null
+    let advance = null as Awaited<ReturnType<AgentController["advanceAddEntryAfterFill"]>> | null
+
+    if (toolResult.ok && filledCount > 0) {
+      const section = findAddEntrySectionForFilledFields(fields, pageContext)
+      if (section) {
+        const sectionFields = getSectionFillableFields(pageContext, section.sectionLabel)
+        const valueBySelector = buildPostFillValueMap(sectionFields, fields)
+        const missing = getMissingRequiredFields(
+          sectionFields,
+          new Set(fields.map((field) => field.selector)),
+          valueBySelector
+        )
+        if (missing.length) {
+          const missingMsg = buildMissingRequiredMessage(missing)
+          toolResult = {
+            ...toolResult,
+            result: {
+              ...(typeof toolResult.result === "object" && toolResult.result
+                ? (toolResult.result as Record<string, unknown>)
+                : {}),
+              missingRequired: missingMsg,
+              addEntry: {
+                submitted: false,
+                openedNext: true,
+                sectionLabel: section.sectionLabel,
+                entryNumber: getSectionSavedCount(section),
+                nextStep: missingMsg
+              }
+            }
+          }
+        } else {
+          advance = await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
+        }
+      } else {
+        advance = await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
+      }
+    }
+
     if (advance) {
       toolResult = {
         ...toolResult,
@@ -1047,10 +1129,19 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     sectionLabel: string
     entryNumber: number
     nextStep: string
+    entryAdded?: boolean
+    savedCount?: number
+    sessionAdded?: number
+    lastSavedSummary?: string
     error?: string
   } | null> {
     const section = findAddEntrySectionForFilledFields(fields, pageContext)
     if (!section) return null
+
+    const pageBefore = await ctx.getPageContext()
+    const sectionBefore =
+      pageBefore.addEntrySections?.find((s) => s.sectionLabel === section.sectionLabel) ?? section
+    const beforeEntries = sectionBefore.savedEntries ?? []
 
     const submitSelector = pickCssSelector(section.submitSelector)
     devLog("Add-entry auto advance", { section: section.sectionLabel, submitSelector })
@@ -1062,11 +1153,48 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         submitted: false,
         openedNext: false,
         sectionLabel: section.sectionLabel,
-        entryNumber: this.addEntryCounts.get(section.sectionLabel) ?? 0,
+        entryNumber: getSectionSavedCount(sectionBefore),
         nextStep: submitOutcome.error ?? `Click submit to save: ${submitSelector}`,
+        entryAdded: false,
+        savedCount: getSectionSavedCount(sectionBefore),
+        sessionAdded: this.addEntrySessionCounts.get(section.sectionLabel) ?? 0,
         error: submitOutcome.error
       }
     }
+
+    const pageAfter = await ctx.getPageContext()
+    const sectionAfter =
+      pageAfter.addEntrySections?.find((s) => s.sectionLabel === section.sectionLabel) ?? section
+    const afterEntries = sectionAfter.savedEntries ?? []
+    const { entryAdded, newEntries } = diffSavedEntries(beforeEntries, afterEntries)
+    const savedCount = getSectionSavedCount(sectionAfter)
+    const lastSavedSummary = formatLastSavedSummary(newEntries[newEntries.length - 1])
+
+    if (!entryAdded) {
+      this.openAddEntrySectionLabel = null
+      const formReady = await openAddEntrySection(ctx.tabId, section)
+      if (formReady) {
+        this.openAddEntrySectionLabel = section.sectionLabel
+      }
+      return {
+        submitted: true,
+        openedNext: formReady,
+        sectionLabel: section.sectionLabel,
+        entryNumber: savedCount,
+        nextStep: formReady
+          ? `No new entry appeared in the saved list — fix required fields and fill_fields again. Form reopened.`
+          : `No new entry appeared — click ${section.addButtonLabel} and retry with corrected values.`,
+        entryAdded: false,
+        savedCount,
+        sessionAdded: this.addEntrySessionCounts.get(section.sectionLabel) ?? 0,
+        error: "Submit closed form but no new entry appeared in the saved list."
+      }
+    }
+
+    const sessionAdded =
+      (this.addEntrySessionCounts.get(section.sectionLabel) ?? 0) + newEntries.length
+    this.addEntrySessionCounts.set(section.sectionLabel, sessionAdded)
+    this.addEntryCounts.set(section.sectionLabel, savedCount)
 
     this.openAddEntrySectionLabel = null
 
@@ -1076,18 +1204,23 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       this.openAddEntrySectionLabel = section.sectionLabel
     }
 
-    const entryNumber = (this.addEntryCounts.get(section.sectionLabel) ?? 0) + 1
-    this.addEntryCounts.set(section.sectionLabel, entryNumber)
     this.lastFillFieldsSignature = null
+
+    const advanceMsg = buildAddEntryAdvanceMessage(section, savedCount)
+    const summaryNote = lastSavedSummary ? ` Last saved: "${lastSavedSummary}".` : ""
 
     return {
       submitted: true,
       openedNext: formReady,
       sectionLabel: section.sectionLabel,
-      entryNumber,
+      entryNumber: savedCount,
       nextStep: formReady
-        ? buildAddEntryAdvanceMessage(section, entryNumber)
+        ? `${advanceMsg}${summaryNote}`
         : `Click ${section.addButtonLabel} and wait for the form fields to appear before filling.`,
+      entryAdded: true,
+      savedCount,
+      sessionAdded,
+      lastSavedSummary,
       error: formReady ? undefined : "Add clicked but the form did not open in time."
     }
   }

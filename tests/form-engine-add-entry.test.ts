@@ -26,4 +26,15 @@ describe("generic add-entry sections", () => {
     const fields = detectFormFields(form)
     expect(fields.find((f) => f.id === "job-title")?.label).toBe("Work experience - Title")
   })
+
+  it("detects saved entries already on the page", () => {
+    mountAddEntrySectionForm()
+    const sections = detectAddEntrySections()
+    expect(sections).toHaveLength(1)
+    expect(sections[0].entryCount).toBe(2)
+    expect(sections[0].savedEntries).toHaveLength(2)
+    expect(sections[0].savedEntries[0].fingerprint).toBe("exp-1")
+    expect(sections[0].savedEntries[0].summary).toContain("Acme Corp")
+    expect(sections[0].entriesListSelector).toBe("#experience-list")
+  })
 })

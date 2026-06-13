@@ -15,7 +15,10 @@ export function mountAddEntrySectionForm(): void {
           <button type="button" class="btn-cancel" data-skilltype="experience">Cancel</button>
         </form>
       </div>
-      <div id="experience-list"></div>
+      <div id="experience-list">
+        <div id="exp-1" class="experience-row">2020-2021 | Acme Corp | Engineer</div>
+        <div id="exp-2" class="experience-row">2018-2019 | Beta LLC | Intern</div>
+      </div>
     </section>
     <section id="section-profile">
       <h2>Personal details</h2>

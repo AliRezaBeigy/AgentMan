@@ -10,10 +10,12 @@ describe("add-entry-open", () => {
     sectionLabel: "Work experience",
     addButtonLabel: "Add work experience",
     addButtonSelector: 'button[onclick*="showAddnewSkill(\'cvjob\')"]',
+    formSelector: "#add-cvjob",
     submitSelector: '#add-cvjob button[type="submit"]',
     cancelButtonSelector: '#add-cvjob button[type="button"]',
-    formReadySelector: "#add-cvjob:not(.hidden)",
-    formClosedSelector: "#add-cvjob.hidden"
+    fieldLabels: [],
+    entryCount: 0,
+    savedEntries: []
   }
 
   it("extracts showAddnewSkill type from add button selector", () => {

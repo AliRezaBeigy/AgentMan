@@ -2,16 +2,26 @@ import { cdpSession } from "~/background/cdp/session"
 import { waitForAddEntryFormClosed } from "~/background/add-entry-wait"
 import { pickCssSelector } from "~/lib/add-entry-workflow"
 import { devLog } from "~/lib/dev-log"
-import { buildAddEntrySubmitScript } from "~/lib/form-validation-bypass"
 import type { AddEntrySectionDescriptor } from "~/lib/types"
 
 export interface SubmitAddEntryResult {
   ok: boolean
   error?: string
 }
-
 function buildSubmitExpression(formSelector: string, submitSelector: string): string {
-  return buildAddEntrySubmitScript(formSelector, submitSelector)
+  return `(() => {
+    const form = document.querySelector(${JSON.stringify(formSelector)});
+    const submit = document.querySelector(${JSON.stringify(submitSelector)});
+    if (!form) return { ok: false, error: "form not found" };
+    if (!submit) return { ok: false, error: "submit button not found" };
+    submit.scrollIntoView({ block: "center", inline: "center" });
+    try {
+      submit.click();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  })()`
 }
 
 export async function submitAddEntryForm(

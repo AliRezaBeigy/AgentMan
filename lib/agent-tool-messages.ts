@@ -1,5 +1,8 @@
 /** Compact tool results for agent chat history — keeps tokens small without summarizing. */
 
+import { formatSavedEntriesBlock } from "~/lib/add-entry-saved-rows"
+import type { AddEntrySectionDescriptor } from "~/lib/types"
+
 export interface AgentToolResult {
   ok: boolean
   result?: unknown
@@ -21,6 +24,7 @@ export function compactToolResultForAgent(
       ok: toolResult.ok,
       filled: result?.filled,
       skipped: result?.skipped,
+      missingRequired: result?.missingRequired,
       error: toolResult.error,
       addEntry: addEntry
         ? {
@@ -29,6 +33,10 @@ export function compactToolResultForAgent(
             sectionLabel: addEntry.sectionLabel,
             entryNumber: addEntry.entryNumber,
             nextStep: addEntry.nextStep,
+            entryAdded: addEntry.entryAdded,
+            savedCount: addEntry.savedCount,
+            sessionAdded: addEntry.sessionAdded,
+            lastSavedSummary: addEntry.lastSavedSummary,
             error: addEntry.error
           }
         : undefined
@@ -44,10 +52,16 @@ export function compactToolResultForAgent(
   }
 
   if (toolName === "get_page_content") {
+    const sections = result?.addEntrySections as AddEntrySectionDescriptor[] | undefined
+    const savedBlock =
+      sections?.length ? formatSavedEntriesBlock(sections) : undefined
     return {
       ok: toolResult.ok,
       error: toolResult.error,
-      note: "Page fields are listed in the system prompt — use those selectors."
+      note: savedBlock
+        ? "Saved entries on page (field aliases are in the system prompt)."
+        : "Page fields are listed in the system prompt — use those selectors.",
+      savedEntries: savedBlock
     }
   }
 
@@ -95,7 +109,14 @@ export function formatCompactAgentToolResultMessage(
   if (toolName === "fill_fields") {
     const addEntry = compact.addEntry as Record<string, unknown> | undefined
     if (addEntry) {
-      return `Saved ${addEntry.sectionLabel} entry ${addEntry.entryNumber}. ${addEntry.nextStep ?? ""}`.trim()
+      if (addEntry.entryAdded === false) {
+        return `Save failed — no new entry in list (${addEntry.savedCount ?? 0} on page). ${addEntry.error ?? addEntry.nextStep ?? ""}`.trim()
+      }
+      const summary =
+        typeof addEntry.lastSavedSummary === "string"
+          ? ` "${addEntry.lastSavedSummary}"`
+          : ""
+      return `Saved ${addEntry.sectionLabel} entry #${addEntry.entryNumber} (${addEntry.savedCount ?? addEntry.entryNumber} on page).${summary} ${addEntry.nextStep ?? ""}`.trim()
     }
     return `Filled ${compact.filled ?? 0} field(s).`
   }

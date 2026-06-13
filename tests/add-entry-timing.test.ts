@@ -24,7 +24,8 @@ const section: AddEntrySectionDescriptor = {
   submitSelector: "#experience-form button[type='submit']",
   cancelButtonSelector: "#experience-form .btn-cancel",
   fieldLabels: ["Work experience - Title", "Work experience - Employer"],
-  entryCount: 0
+  entryCount: 0,
+  savedEntries: []
 }
 
 describe("add-entry-timing", () => {

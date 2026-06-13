@@ -43,7 +43,9 @@ const pageContext: PageContext = {
       addButtonLabel: "Add education",
       formSelector: "#add-cveducation",
       submitSelector: "#add-cveducation button[type='submit']",
-      fieldLabels: educationFields.map((f) => f.label!)
+      fieldLabels: educationFields.map((f) => f.label!),
+      entryCount: 0,
+      savedEntries: []
     }
   ]
 }
@@ -83,7 +85,9 @@ const workPageContext: PageContext = {
       addButtonLabel: "Add work experience",
       formSelector: "#add-cvjob",
       submitSelector: "#add-cvjob button[type='submit']",
-      fieldLabels: workFields.map((f) => f.label!)
+      fieldLabels: workFields.map((f) => f.label!),
+      entryCount: 0,
+      savedEntries: []
     }
   ]
 }

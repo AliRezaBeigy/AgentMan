@@ -1,5 +1,6 @@
 import { filterAddEntrySectionsForIntent, filterFieldsForIntent } from "~/lib/page-form-context"
 import { getFillableFields } from "~/lib/fill-parse"
+import { buildIndirectAttachmentHint, isPlaceholderSelectValue } from "~/lib/required-field-detect"
 import type { FormFieldDescriptor, PageContext } from "~/lib/types"
 
 const SECTION_ALIASES: Record<string, string> = {
@@ -38,11 +39,26 @@ function formatOptions(field: FormFieldDescriptor): string {
   if (field.type !== "select" && field.type !== "button-group") return ""
   if (!field.options?.length) return ""
   const opts = field.options
+    .filter((o) => !isPlaceholderSelectValue(o.value))
     .slice(0, 4)
     .map((o) => o.value || o.label)
     .join("|")
-  const more = field.options.length > 4 ? `|+${field.options.length - 4}` : ""
+  if (!opts) return ""
+  const more =
+    field.options.filter((o) => !isPlaceholderSelectValue(o.value)).length > 4
+      ? `|+${field.options.filter((o) => !isPlaceholderSelectValue(o.value)).length - 4}`
+      : ""
   return `;${opts}${more}`
+}
+
+function formatAliasLine(alias: string, field: FormFieldDescriptor): string {
+  const parts = [alias, field.type]
+  if (field.required) parts.push("REQUIRED")
+  const options = formatOptions(field)
+  if (options) parts.push(options.slice(1))
+  const indirect = buildIndirectAttachmentHint(field)
+  if (indirect) parts.push(indirect)
+  return parts.join(";")
 }
 
 export function buildFillFieldAliasRegistry(
@@ -83,7 +99,7 @@ export function buildFillFieldAliasRegistry(
       aliasToSelector.set(field.id, field.selector)
     }
 
-    lines.push(`${alias};${field.type}${formatOptions(field)}`)
+    lines.push(formatAliasLine(alias, field))
   }
 
   const promptBlock = lines.join("\n")

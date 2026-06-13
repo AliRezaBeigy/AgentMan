@@ -1,3 +1,4 @@
+import { formatSavedEntriesBlock } from "~/lib/add-entry-saved-rows"
 import { cdpSession } from "~/background/cdp/session"
 import { MessageType } from "~/lib/messages"
 import { parseFillFieldsArg } from "~/lib/tool-args"
@@ -158,12 +159,23 @@ export async function executeTool(
 
       case "get_page_content": {
         const pageContext = await context.getPageContext()
+        const sections = pageContext.addEntrySections ?? []
         const summary = pageContext.textSummary ?? ""
         const maxSummary = 3500
+        const savedEntriesBlock = sections.length
+          ? formatSavedEntriesBlock(sections)
+          : undefined
         return {
           ok: true,
           result: {
-            ...pageContext,
+            url: pageContext.url,
+            title: pageContext.title,
+            addEntrySections: sections.map((section) => ({
+              sectionLabel: section.sectionLabel,
+              entryCount: section.entryCount,
+              savedEntries: section.savedEntries
+            })),
+            savedEntriesBlock,
             textSummary:
               summary.length > maxSummary ? `${summary.slice(0, maxSummary)}…` : summary
           }

@@ -1,3 +1,4 @@
+import { formatSavedEntriesBlock, getSectionSavedCount } from "~/lib/add-entry-saved-rows"
 import { pickCssSelector } from "~/lib/add-entry-workflow"
 import { buildFillFieldAliasRegistry } from "~/lib/fill-field-aliases"
 import { getFillableFields } from "~/lib/fill-parse"
@@ -167,10 +168,10 @@ export function assistantTurnNeedsToolFollowUp(text: string): boolean {
   return false
 }
 
-/** Reject done when targeted add-entry sections still have zero saved rows. */
+/** Reject done when targeted add-entry sections have no saved entries on the page. */
 export function buildPrematureDoneRejection(
   userMessage: string,
-  addEntryCounts: ReadonlyMap<string, number>,
+  _addEntryCounts: ReadonlyMap<string, number>,
   addEntrySections: AddEntrySectionDescriptor[],
   fields: FormFieldDescriptor[]
 ): string | null {
@@ -178,12 +179,12 @@ export function buildPrematureDoneRejection(
   if (!targeted.length) return null
 
   const missing = targeted
-    .filter((section) => (addEntryCounts.get(section.sectionLabel) ?? 0) === 0)
+    .filter((section) => getSectionSavedCount(section) === 0)
     .map((section) => section.sectionLabel)
 
   if (!missing.length) return null
 
-  return `Do not call done yet — no entries saved for: ${missing.join(", ")}. For each section: {"action":"click","section":"..."} then fill_fields once per CV item. Finish ALL work experience items before opening Education. Only one section form can be open at a time.`
+  return `Do not call done yet — no saved entries on page for: ${missing.join(", ")}. For each section: {"action":"click","section":"..."} then fill_fields once per CV item. Finish ALL work experience items before opening Education. Only one section form can be open at a time.`
 }
 
 export function buildAgentContinuationNudge(
@@ -242,6 +243,8 @@ export function buildAgentFormContextNote(
 
   if (addEntrySections.length) {
     lines.push("")
+    lines.push(formatSavedEntriesBlock(addEntrySections))
+    lines.push("")
     lines.push("Add-entry sections (each item is a separate sub-form):")
     for (const section of addEntrySections) {
       lines.push(`- ${section.sectionLabel}:`)
@@ -290,14 +293,17 @@ export function buildCompactAddEntrySystemPrompt(
     )
     .join("\n")
 
+  const savedBlock = sections.length ? `\n${formatSavedEntriesBlock(sections)}\n` : ""
+
   return `AgentMan. Page: ${pageContext.url}
-Return ONE JSON object per turn — never a JSON array.
+Use click / fill_fields / done tools — one tool call per turn (never a JSON array in content).
 Workflow: click section → fill_fields → auto-save → next entry.
 Sections (label|open|save):
 ${sectionLines}
-Field aliases (alias;type;options) — use alias as selector in fill_fields, or #element-id:
+${savedBlock}Field aliases (alias;type;REQUIRED;options;attachment hints) — fill every REQUIRED line in one fill_fields call:
 ${fieldAliases}
-Example: {"action":"fill_fields","fields":[{"selector":"work:title","value":"..."},{"selector":"#cvjob-company","value":"..."}]}`
+REQUIRED fields must have real values (selects: never -1/Choose). Lines with "attachment:" map CV data under different names (e.g. edu:field_of_education = degree major from attachment, edu:education_name = Bachelor/Master/PhD).
+Example fill_fields: [{"selector":"work:title","value":"..."},{"selector":"edu:field_of_education","value":"Computer Science"},{"selector":"#education-country","value":"IR"}]`
 }
 
 export const ADD_ENTRY_TURN_HINT_PREFIX = "[Next step]"
@@ -305,34 +311,80 @@ export const ADD_ENTRY_TURN_HINT_PREFIX = "[Next step]"
 export function buildAddEntryTurnHint(
   addEntryCounts: ReadonlyMap<string, number>,
   lastToolName: string | null,
-  openSectionLabel: string | null = null
+  openSectionLabel: string | null = null,
+  sections: AddEntrySectionDescriptor[] = [],
+  sessionCounts: ReadonlyMap<string, number> = new Map(),
+  textActionMode = false
 ): string {
-  const workCount = addEntryCounts.get("Work experience") ?? 0
-  const educationCount = addEntryCounts.get("Education") ?? 0
+  const progressParts = sections
+    .map((section) => {
+      const onPage = getSectionSavedCount(section)
+      const sessionAdded = sessionCounts.get(section.sectionLabel) ?? 0
+      return `${section.sectionLabel}: ${onPage} on page${sessionAdded > 0 ? `, +${sessionAdded} this run` : ""}`
+    })
+    .join("; ")
+  const progressSuffix = progressParts ? ` (${progressParts}).` : ""
+
+  const workOnPage =
+    getSectionSavedCount(sections.find((s) => s.sectionLabel === "Work experience")) ||
+    addEntryCounts.get("Work experience") ||
+    0
+  const educationOnPage =
+    getSectionSavedCount(sections.find((s) => s.sectionLabel === "Education")) ||
+    addEntryCounts.get("Education") ||
+    0
+
+  const firstOpen = textActionMode
+    ? 'Return ONE JSON object only (not an array). First: {"action":"click","section":"Work experience"}'
+    : "Call the click tool with section Work experience (do not put JSON in content — use the tool)."
 
   if (openSectionLabel) {
-    return `${ADD_ENTRY_TURN_HINT_PREFIX} ${openSectionLabel} form is open. Return fill_fields with the NEXT ${openSectionLabel} item from the attachment — do NOT click Add again.`
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} ${openSectionLabel} form is open.${progressSuffix} ${
+      textActionMode
+        ? `Return fill_fields with the NEXT ${openSectionLabel} item from the attachment — do NOT click Add again.`
+        : `Call fill_fields with the NEXT ${openSectionLabel} item — do NOT click Add again.`
+    }`
   }
 
   if (!lastToolName) {
-    return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE JSON object only (not an array). First: {"action":"click","section":"Work experience"}`
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} ${firstOpen}${progressSuffix}`
   }
 
   if (lastToolName === "click") {
-    return `${ADD_ENTRY_TURN_HINT_PREFIX} Form open. Return fill_fields using work:* / edu:* aliases (or #id) with values from the attachment. Do NOT click Add again.`
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} Form open.${progressSuffix} ${
+      textActionMode
+        ? "Return fill_fields using work:* / edu:* aliases (or #id) with values from the attachment. Do NOT click Add again."
+        : "Call fill_fields using work:* / edu:* aliases (or #id) with values from the attachment. Do NOT click Add again."
+    }`
   }
 
   if (lastToolName === "fill_fields") {
-    if (workCount === 0) {
-      return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action: {"action":"click","section":"Work experience"} then fill_fields for the first work entry.`
+    if (workOnPage === 0) {
+      return `${ADD_ENTRY_TURN_HINT_PREFIX} ${
+        textActionMode
+          ? 'Return ONE action: {"action":"click","section":"Work experience"} then fill_fields for the first work entry.'
+          : "Call click (Work experience) then fill_fields for the first work entry."
+      }${progressSuffix}`
     }
-    if (educationCount === 0) {
-      return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action: {"action":"click","section":"Education"} or fill_fields for the next work entry if more remain.`
+    if (educationOnPage === 0) {
+      return `${ADD_ENTRY_TURN_HINT_PREFIX} ${
+        textActionMode
+          ? 'Return ONE action: {"action":"click","section":"Education"} or fill_fields for the next work entry if more remain.'
+          : "Call click (Education) or fill_fields for the next work entry if more remain."
+      }${progressSuffix}`
     }
-    return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE action for the next unsaved entry, or {"action":"done","message":"..."} when all items are saved.`
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} ${
+      textActionMode
+        ? 'Return ONE action for the next unsaved entry, or {"action":"done","message":"..."} when all items are saved.'
+        : "Call the next tool (fill_fields or done) for the next unsaved entry."
+    }${progressSuffix}`
   }
 
-  return `${ADD_ENTRY_TURN_HINT_PREFIX} Return ONE JSON object for the immediate next step.`
+  return `${ADD_ENTRY_TURN_HINT_PREFIX} ${
+    textActionMode
+      ? "Return ONE JSON object for the immediate next step."
+      : "Call one tool for the immediate next step."
+  }${progressSuffix}`
 }
 
 export function buildAgentSystemPrompt(pageContext: PageContext, userMessage?: string): string {
@@ -350,8 +402,9 @@ Add-entry workflow (repeat for EACH item from the user's documents):
 5. Call done only after every section mentioned by the user has at least one saved entry AND no more items remain in the attachment.
 
 Rules:
-- One fill_fields per entry, then wait for auto-advance — do not call fill_fields multiple times for the same entry.
+- One fill_fields per entry with ALL REQUIRED fields — then wait for auto-advance.
 - For selects, use exact option values from the field list (e.g. IR not Iran). Never use Choose or -1.
+- REQUIRED fields marked in the alias list; "attachment:" hints show where CV data lives under a different name.
 - Education "Finished part" must be 3–6 (not 1 or 2). Education level must match the degree (e.g. 10106 for Master).
 - Field selectors are listed below — do not call get_page_content unless a click or fill failed.
 - Use attached file context in the user message for factual data.${formNote}`

@@ -66,7 +66,8 @@ const pageContext: PageContext = {
         "Work experience - City",
         "Work experience - Country"
       ],
-      entryCount: 0
+      entryCount: 0,
+      savedEntries: []
     },
     {
       sectionLabel: "Education",
@@ -76,7 +77,8 @@ const pageContext: PageContext = {
       submitSelector: "#add-cveducation button[type='submit']",
       cancelButtonSelector: "#add-cveducation button.btn-cancel",
       fieldLabels: ["Education - Education name", "Education - University / College"],
-      entryCount: 0
+      entryCount: 0,
+      savedEntries: []
     }
   ],
   viewport: { width: 1280, height: 800, scrollX: 0, scrollY: 0 }

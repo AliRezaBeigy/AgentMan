@@ -17,10 +17,6 @@ import {
   setCaption,
   startScreenshotSelection
 } from "~/contents/lib/overlay"
-import {
-  restorePageValidation,
-  suppressPageValidation
-} from "~/contents/lib/validation-suppress"
 import { MessageType, type RuntimeMessage } from "~/lib/messages"
 import type { PageContext } from "~/lib/types"
 
@@ -126,16 +122,6 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResp
 
     case MessageType.HIDE_UI_FOR_SCREENSHOT:
       hideAgentUi()
-      sendResponse({ ok: true })
-      return true
-
-    case MessageType.SUPPRESS_PAGE_VALIDATION:
-      suppressPageValidation()
-      sendResponse({ ok: true })
-      return true
-
-    case MessageType.RESTORE_PAGE_VALIDATION:
-      restorePageValidation()
       sendResponse({ ok: true })
       return true
 

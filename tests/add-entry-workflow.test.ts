@@ -40,7 +40,8 @@ const pageContext: PageContext = {
         "Work experience - Employer",
         "Work experience - City"
       ],
-      entryCount: 0
+      entryCount: 0,
+      savedEntries: []
     }
   ],
   viewport: { width: 1280, height: 800, scrollX: 0, scrollY: 0 }
