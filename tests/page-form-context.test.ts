@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   assistantTurnNeedsToolFollowUp,
+  assistantClaimsTaskComplete,
   buildAgentFormContextNote,
   buildPrematureDoneRejection,
   filterAddEntrySectionsForIntent,
@@ -81,6 +82,16 @@ describe("page-form-context", () => {
     expect(assistantTurnNeedsToolFollowUp("All work and education entries have been added.")).toBe(
       false
     )
+    expect(
+      assistantClaimsTaskComplete(
+        "I've successfully added all 7 work experience entries and both education entries from your application."
+      )
+    ).toBe(true)
+    expect(
+      assistantTurnNeedsToolFollowUp(
+        "I've successfully added all 7 work experience entries and both education entries from your application."
+      )
+    ).toBe(false)
   })
 
   it("rejects done when targeted sections have no saved entries on page", () => {

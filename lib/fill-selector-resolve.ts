@@ -1,27 +1,6 @@
 import { resolveAliasSelector } from "~/lib/fill-field-aliases"
 import type { FormFieldDescriptor, PageContext } from "~/lib/types"
 
-/** Common LLM guesses on Varbi cvjob/cveducation forms → real element ids. */
-const VARBI_GUESSED_ID_ALIASES: Record<string, string> = {
-  "cvjob-employer": "cvjob-company",
-  "cvjob-city": "cvjob-town",
-  "cvjob-from": "cvjob-year-from",
-  "cvjob-to": "cvjob-year-to",
-  "cvjob-start": "cvjob-year-from",
-  "cvjob-end": "cvjob-year-to",
-  "cveducation-fieldofstudy": "education_field",
-  "cveducation-fieldOfStudy": "education_field",
-  "cveducation-schoolname": "education-name",
-  "cveducation-degreeName": "education-name",
-  "cveducation-degree": "education-name",
-  "cveducation-school": "education-university",
-  "cveducation-university": "education-university",
-  "cveducation-city": "education-town",
-  "cveducation-country": "education-country",
-  "cveducation-from": "education-date-from",
-  "cveducation-to": "education-date-to"
-}
-
 export function getSectionFillableFields(
   pageContext: PageContext,
   sectionLabel: string
@@ -39,10 +18,6 @@ export function getSectionFillableFields(
   return pageContext.fields.filter(
     (field) => !field.isFileInput && field.label && allowed.has(field.label)
   )
-}
-
-function normalizeVarbiElementId(id: string): string {
-  return VARBI_GUESSED_ID_ALIASES[id] ?? id
 }
 
 function extractFieldKeyFromSelector(selector: string): string | null {
@@ -96,8 +71,7 @@ export function resolveFillFieldSelector(
 
   const idMatch = trimmed.match(/#([A-Za-z0-9_-]+)/)
   if (idMatch) {
-    const normalizedId = normalizeVarbiElementId(idMatch[1])
-    const byId = candidates.find((field) => field.id === normalizedId || field.id === idMatch[1])
+    const byId = candidates.find((field) => field.id === idMatch[1])
     if (byId) return byId.selector
   }
 

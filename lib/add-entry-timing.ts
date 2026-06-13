@@ -40,6 +40,34 @@ export function canonicalizeShowAddnewSkillSelector(text: string): string | null
   return `button[onclick*="showAddnewSkill('${match[1]}')"]`
 }
 
+function sectionLabelTokens(label: string): string[] {
+  return label.toLowerCase().match(/[a-z0-9]+/g) ?? []
+}
+
+function scoreTextForSection(text: string, section: AddEntrySectionDescriptor): number {
+  const lower = text.toLowerCase()
+  let score = 0
+
+  const formId = section.formSelector.replace(/^#/, "").toLowerCase()
+  if (formId && lower.includes(formId)) score += 40
+
+  const addSel = pickCssSelector(section.addButtonSelector).toLowerCase()
+  if (addSel.length > 4 && lower.includes(addSel.slice(0, Math.min(addSel.length, 24)))) {
+    score += 25
+  }
+
+  for (const token of sectionLabelTokens(section.sectionLabel)) {
+    if (token.length > 2 && lower.includes(token)) score += 15
+  }
+
+  for (const label of section.fieldLabels.slice(0, 6)) {
+    const part = label.split(" - ").slice(1).join(" - ").toLowerCase()
+    if (part.length > 2 && lower.includes(part)) score += 5
+  }
+
+  return score
+}
+
 /** Guess add-entry section from a selector, label, or raw model text. */
 export function inferAddEntrySectionFromText(
   text: string,
@@ -58,22 +86,13 @@ export function inferAddEntrySectionFromText(
     if (bySkill) return bySkill
   }
 
-  const lower = text.toLowerCase()
-  if (lower.includes("cvjob") || lower.includes("work experience")) {
-    return sections.find((section) => /work experience/i.test(section.sectionLabel)) ?? null
-  }
-  if (lower.includes("cveducation") || /\beducation\b/.test(lower)) {
-    return (
-      sections.find((section) => section.sectionLabel.toLowerCase() === "education") ??
-      sections.find((section) => /education/i.test(section.sectionLabel)) ??
-      null
-    )
-  }
-  if (lower.includes("cvlang") || /\blanguage\b/.test(lower)) {
-    return sections.find((section) => /language/i.test(section.sectionLabel)) ?? null
+  let best: { section: AddEntrySectionDescriptor; score: number } | null = null
+  for (const section of sections) {
+    const score = scoreTextForSection(text, section)
+    if (score >= 15 && (!best || score > best.score)) best = { section, score }
   }
 
-  return null
+  return best?.section ?? null
 }
 
 export interface ResolvedAddEntryClick {

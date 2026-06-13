@@ -3,23 +3,15 @@ import { getFillableFields } from "~/lib/fill-parse"
 import { buildIndirectAttachmentHint, isPlaceholderSelectValue } from "~/lib/required-field-detect"
 import type { FormFieldDescriptor, PageContext } from "~/lib/types"
 
-const SECTION_ALIASES: Record<string, string> = {
-  "Work experience": "work",
-  Education: "edu",
-  Language: "lang"
-}
-
 export interface FillFieldAliasRegistry {
   aliasToSelector: Map<string, string>
   promptBlock: string
 }
 
 function sectionAlias(sectionLabel: string): string {
-  if (SECTION_ALIASES[sectionLabel]) return SECTION_ALIASES[sectionLabel]
-  return sectionLabel
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .slice(0, 4)
+  const words = sectionLabel.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  const first = words[0] ?? "field"
+  return first.slice(0, 4)
 }
 
 function fieldSlug(field: FormFieldDescriptor): string {

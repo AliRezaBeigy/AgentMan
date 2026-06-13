@@ -117,7 +117,7 @@ describe("fill-selector-resolve", () => {
     expect(resolved[0].selector).toBe("#cvjob-position")
   })
 
-  it("maps guessed Varbi work ids to canonical selectors", () => {
+  it("maps guessed element ids to canonical selectors via label matching", () => {
     expect(resolveFillFieldSelector("#cvjob-employer", workFields)).toBe(
       workFields[1].selector
     )

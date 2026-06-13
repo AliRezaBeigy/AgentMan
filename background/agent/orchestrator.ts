@@ -18,7 +18,10 @@ import {
 import { buildPageContextNote, getLastUserMessage, pruneInvalidFillKeys } from "~/lib/fill-intent"
 import {
   assistantTurnNeedsToolFollowUp,
+  assistantClaimsTaskComplete,
   buildAgentContinuationNudge,
+  buildFalseCompletionNudge,
+  buildFalseCompletionNudge,
   buildAgentSystemPrompt,
   buildCompactAddEntrySystemPrompt,
   buildAddEntryTurnHint,
@@ -56,6 +59,15 @@ import {
 } from "~/lib/fill-selector-resolve"
 import { extractRowFieldKeys } from "~/lib/fill-values"
 import { normalizeToolArguments, parseFillFieldsArg } from "~/lib/tool-args"
+import {
+  formatCompletionDoneHint,
+  getSectionEntryRemaining,
+  isAddEntryTaskComplete
+} from "~/lib/add-entry-completion"
+import {
+  buildDuplicateEntryMessage,
+  findDuplicateSavedEntry
+} from "~/lib/add-entry-duplicate"
 import {
   buildMissingRequiredMessage,
   getMissingRequiredFields
@@ -121,6 +133,7 @@ class AgentController {
   private addEntrySectionsSnapshot: AddEntrySectionDescriptor[] = []
   private lastAgentToolName: string | null = null
   private openAddEntrySectionLabel: string | null = null
+  private addEntryUserMessage: string | null = null
   private fieldAliasMap: Map<string, string> | null = null
   /** Models that returned "does not support tools" — use JSON text actions instead. */
   private readonly toolsSupportCache = new Map<string, boolean>()
@@ -556,6 +569,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     this.addEntrySectionsSnapshot = []
     this.lastAgentToolName = null
     this.openAddEntrySectionLabel = null
+    this.addEntryUserMessage = null
     let continuationNudges = 0
     const maxContinuationNudges = 12
     let textActionMode = this.toolsSupportCache.get(model) === false
@@ -563,6 +577,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       options.ollamaKeepAlive ?? (await getSettings()).ollamaKeepAlive
 
     if (options.addEntryMode) {
+      this.addEntryUserMessage = getLastUserMessage(messages)
       const initialContext = await ctx.getPageContext()
       this.addEntrySectionsSnapshot = initialContext.addEntrySections ?? []
       for (const section of this.addEntrySectionsSnapshot) {
@@ -719,6 +734,41 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
           continue
         }
 
+        if (options.addEntryMode) {
+          const pageContext = await ctx.getPageContext()
+          const userMsg = this.addEntryUserMessage ?? getLastUserMessage(messages)
+          if (
+            isAddEntryTaskComplete(
+              userMsg,
+              pageContext.addEntrySections ?? [],
+              pageContext.fields,
+              this.addEntryBaselineCounts
+            )
+          ) {
+            devLog("Add-entry task complete — accepting text-only finish", {
+              text: text.slice(0, 120)
+            })
+            finalContent = text
+            break
+          }
+
+          if (assistantClaimsTaskComplete(text)) {
+            continuationNudges++
+            devLog("Agent claimed complete but counts mismatch", { continuationNudges })
+            messages.push({ role: "assistant", content: text })
+            messages.push({
+              role: "user",
+              content: buildFalseCompletionNudge(
+                userMsg,
+                pageContext.addEntrySections ?? [],
+                this.addEntryBaselineCounts,
+                textActionMode
+              )
+            })
+            continue
+          }
+        }
+
         if (
           options.addEntryMode &&
           continuationNudges < maxContinuationNudges &&
@@ -727,12 +777,26 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         ) {
           continuationNudges++
           devLog("Agent continuation nudge", { continuationNudges, text: text.slice(0, 120) })
+          const pageContext = await ctx.getPageContext()
+          const userMsg = this.addEntryUserMessage ?? getLastUserMessage(messages)
           messages.push({ role: "assistant", content: text })
           messages.push({
             role: "user",
             content: textActionMode
-              ? `Return a JSON action object only. ${buildAgentContinuationNudge(this.addEntryCounts)}`
-              : buildAgentContinuationNudge(this.addEntryCounts)
+              ? `Return a JSON action object only. ${buildAgentContinuationNudge(
+                  this.addEntryCounts,
+                  userMsg,
+                  pageContext.addEntrySections ?? [],
+                  pageContext.fields,
+                  this.addEntryBaselineCounts
+                )}`
+              : buildAgentContinuationNudge(
+                  this.addEntryCounts,
+                  userMsg,
+                  pageContext.addEntrySections ?? [],
+                  pageContext.fields,
+                  this.addEntryBaselineCounts
+                )
           })
           continue
         }
@@ -752,7 +816,8 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
             getLastUserMessage(messages),
             this.addEntryCounts,
             pageContext.addEntrySections ?? [],
-            pageContext.fields
+            pageContext.fields,
+            this.addEntryBaselineCounts
           )
           if (rejection) {
             devLog("Rejected premature done", {
@@ -840,7 +905,9 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       this.openAddEntrySectionLabel,
       this.addEntrySectionsSnapshot,
       this.addEntrySessionCounts,
-      textActionMode
+      textActionMode,
+      this.addEntryUserMessage ?? undefined,
+      this.addEntryBaselineCounts
     )
 
     const existingIndex = messages.findIndex(
@@ -1059,7 +1126,37 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
             }
           }
         } else {
-          advance = await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
+          const sectionDescriptor =
+            pageContext.addEntrySections?.find(
+              (item) => item.sectionLabel === section.sectionLabel
+            ) ?? section
+          const duplicate = findDuplicateSavedEntry(
+            fields,
+            pageContext,
+            section.sectionLabel,
+            sectionDescriptor.savedEntries ?? []
+          )
+          if (duplicate) {
+            const duplicateMsg = buildDuplicateEntryMessage(section.sectionLabel, duplicate)
+            toolResult = {
+              ...toolResult,
+              result: {
+                ...(typeof toolResult.result === "object" && toolResult.result
+                  ? (toolResult.result as Record<string, unknown>)
+                  : {}),
+                duplicateEntry: duplicateMsg,
+                addEntry: {
+                  submitted: false,
+                  openedNext: true,
+                  sectionLabel: section.sectionLabel,
+                  entryNumber: getSectionSavedCount(sectionDescriptor),
+                  nextStep: duplicateMsg
+                }
+              }
+            }
+          } else {
+            advance = await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
+          }
         }
       } else {
         advance = await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
@@ -1206,23 +1303,61 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
 
     this.lastFillFieldsSignature = null
 
-    const advanceMsg = buildAddEntryAdvanceMessage(section, savedCount)
-    const summaryNote = lastSavedSummary ? ` Last saved: "${lastSavedSummary}".` : ""
+    const advanceMsg = this.buildAdvanceNextStep(section, savedCount, formReady, lastSavedSummary)
 
     return {
       submitted: true,
       openedNext: formReady,
       sectionLabel: section.sectionLabel,
       entryNumber: savedCount,
-      nextStep: formReady
-        ? `${advanceMsg}${summaryNote}`
-        : `Click ${section.addButtonLabel} and wait for the form fields to appear before filling.`,
+      nextStep: advanceMsg,
       entryAdded: true,
       savedCount,
       sessionAdded,
       lastSavedSummary,
       error: formReady ? undefined : "Add clicked but the form did not open in time."
     }
+  }
+
+  private buildAdvanceNextStep(
+    section: AddEntrySectionDescriptor,
+    savedCount: number,
+    formReady: boolean,
+    lastSavedSummary?: string
+  ): string {
+    const summaryNote = lastSavedSummary ? ` Last saved: "${lastSavedSummary}".` : ""
+    if (!formReady) {
+      return `Click ${section.addButtonLabel} and wait for the form fields to appear before filling.`
+    }
+
+    const userMessage = this.addEntryUserMessage
+    if (userMessage && this.addEntrySectionsSnapshot.length) {
+      const remaining = getSectionEntryRemaining(
+        userMessage,
+        this.addEntrySectionsSnapshot,
+        this.addEntryBaselineCounts
+      )
+      const sectionRemaining = remaining.find((item) => item.sectionLabel === section.sectionLabel)
+      if (
+        sectionRemaining &&
+        sectionRemaining.expected > 0 &&
+        sectionRemaining.remaining <= 0
+      ) {
+        if (
+          isAddEntryTaskComplete(
+            userMessage,
+            this.addEntrySectionsSnapshot,
+            [],
+            this.addEntryBaselineCounts
+          )
+        ) {
+          return `${formatCompletionDoneHint(remaining, false)}${summaryNote}`
+        }
+        return `All ${section.sectionLabel} items from attachment are saved (${sectionRemaining.onPage - sectionRemaining.baseline}/${sectionRemaining.expected}). Open the next section or call done — do NOT add duplicate entries.${summaryNote}`
+      }
+    }
+
+    return `${buildAddEntryAdvanceMessage(section, savedCount)}${summaryNote}`
   }
 }
 

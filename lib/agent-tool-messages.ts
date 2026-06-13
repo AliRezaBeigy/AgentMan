@@ -24,7 +24,8 @@ export function compactToolResultForAgent(
       ok: toolResult.ok,
       filled: result?.filled,
       skipped: result?.skipped,
-      missingRequired: result?.missingRequired,
+            duplicateEntry: result?.duplicateEntry,
+            missingRequired: result?.missingRequired,
       error: toolResult.error,
       addEntry: addEntry
         ? {
@@ -109,6 +110,9 @@ export function formatCompactAgentToolResultMessage(
   if (toolName === "fill_fields") {
     const addEntry = compact.addEntry as Record<string, unknown> | undefined
     if (addEntry) {
+      if (compact.duplicateEntry) {
+        return String(compact.duplicateEntry)
+      }
       if (addEntry.entryAdded === false) {
         return `Save failed — no new entry in list (${addEntry.savedCount ?? 0} on page). ${addEntry.error ?? addEntry.nextStep ?? ""}`.trim()
       }

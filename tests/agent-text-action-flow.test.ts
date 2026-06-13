@@ -135,7 +135,7 @@ describe("agent text-action flow (deepseek-coder-v2:lite)", () => {
   it("includes add-entry selectors in the text-action system prompt", () => {
     const prompt = buildTextActionSystemPrompt()
     expect(prompt).toContain("fill_fields")
-    expect(prompt).toContain('"section":"Work experience"')
+    expect(prompt).toContain('"section":"<section label>"')
     expect(prompt).toContain('{"action":"done"')
   })
 })

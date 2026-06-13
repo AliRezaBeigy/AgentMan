@@ -13,7 +13,7 @@ export interface ParsedTextAction {
 
 export function buildCompactTextActionSystemPrompt(): string {
   return `Return exactly ONE JSON object per turn (never a JSON array). Use a \`\`\`json fence.
-Example: {"action":"click","section":"Work experience"}
+Example: {"action":"click","section":"<section label from form>"}
 fill_fields must use {"selector":"...","value":"data from attachment"} — never echo field definitions without values.
 Wait for the action result before the next turn.`
 }
@@ -24,16 +24,15 @@ export function buildTextActionSystemPrompt(): string {
 Return EXACTLY ONE JSON object per turn inside a \`\`\`json fence. No text before or after the fence.
 
 Actions:
-- {"action":"click","section":"Work experience"}
-- {"action":"click","section":"Education"}
-- {"action":"fill_fields","fields":[{"selector":"[data-agentman-field-key=\\"Work experience - Title\\"]","value":"..."}]}
+- {"action":"click","section":"<section label>"}
+- {"action":"fill_fields","fields":[{"selector":"<field selector from list>","value":"..."}]}
 - {"action":"get_page_content"}
 - {"action":"done","message":"summary when finished"}
 
 Rules:
-- To OPEN a section, prefer {"action":"click","section":"Work experience"} — do NOT use onclick selectors.
-- Copy field selectors exactly from the field list (do not guess ids like #cvjob-employer).
-- Finish ALL work experience entries before {"action":"click","section":"Education"}.
+- To OPEN a section, use {"action":"click","section":"<exact section label>"} — do NOT use onclick selectors.
+- Copy field selectors exactly from the field list (do not guess ids).
+- Finish ALL items in one section before opening the next.
 - One fill_fields per entry; extension auto-saves and reopens the form.
 - Call done only when every section has all items from the attachment saved.
 - NEVER return a JSON array of actions — one object per turn only.`
@@ -121,12 +120,12 @@ export function fillFieldsActionHasValues(args: Record<string, unknown>): boolea
 
 export function buildMultiActionRejectionMessage(): string {
   return `Do NOT return a JSON array of steps. Return ONE JSON object for the immediate next action only, then wait for the result.
-Example next step: {"action":"click","section":"Work experience"}`
+Example next step: {"action":"click","section":"<section label>"}`
 }
 
 export function buildEmptyFillFieldsRejectionMessage(): string {
   return `fill_fields must include a "value" for each field from the user's attachment — not field labels/types/options.
-Example: {"action":"fill_fields","fields":[{"selector":"[data-agentman-field-key=\\"Work experience - Title\\"]","value":"Teaching Assistant"}]}`
+Example: {"action":"fill_fields","fields":[{"selector":"<field selector>","value":"<value from attachment>"}]}`
 }
 
 export function shouldSuppressActionArrayStream(content: string): boolean {
@@ -308,8 +307,8 @@ export function textActionNeedsFollowUp(content: string): boolean {
 
 export function buildTextActionRetryMessage(): string {
   return `Return ONE JSON object (not an array) inside a \`\`\`json fence.
-To open a section: {"action":"click","section":"Work experience"}
-To fill: {"action":"fill_fields","fields":[{"selector":"#cvjob-position","value":"Engineer"}]}`
+To open a section: {"action":"click","section":"<section label>"}
+To fill: {"action":"fill_fields","fields":[{"selector":"<field selector>","value":"<value from attachment>"}]}`
 }
 
 /** Convert model text into executable tool calls (non-tool models). */
