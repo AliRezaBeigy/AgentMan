@@ -3,12 +3,17 @@ import type { FormFieldDescriptor } from "~/lib/types"
 const PLACEHOLDER_SELECT_VALUES = new Set([
   "",
   "-1",
-  "0",
   "choose",
   "select",
   "select...",
   "please select"
 ])
+
+function zeroIsValidSelectValue(field: FormFieldDescriptor): boolean {
+  if (field.options?.some((option) => String(option.value).trim() === "0")) return true
+  const label = field.label ?? field.name ?? ""
+  return /budget responsibility|staff responsibility/i.test(label)
+}
 
 /** Label text (raw or cleaned) still indicates required when asterisk / Required marker present. */
 export function labelTextIndicatesRequired(labelText: string): boolean {
@@ -58,9 +63,13 @@ export function detectFieldRequired(el: Element, cleanedLabel?: string): boolean
   return cleanedLabel ? labelTextIndicatesRequired(cleanedLabel) : false
 }
 
-export function isPlaceholderSelectValue(value: string | undefined | null): boolean {
+export function isPlaceholderSelectValue(
+  value: string | undefined | null,
+  field?: FormFieldDescriptor
+): boolean {
   if (value == null) return true
   const normalized = String(value).trim().toLowerCase()
+  if (normalized === "0" && field && zeroIsValidSelectValue(field)) return false
   return PLACEHOLDER_SELECT_VALUES.has(normalized)
 }
 
@@ -69,9 +78,20 @@ export function isEmptyFieldValue(field: FormFieldDescriptor, value: string | un
   const trimmed = String(value).trim()
   if (!trimmed) return true
   if (field.type === "select" || field.type === "button-group") {
-    return isPlaceholderSelectValue(trimmed)
+    return isPlaceholderSelectValue(trimmed, field)
   }
   return false
+}
+
+export function getVarbiResponsibilityDefaultFields(
+  sectionFields: FormFieldDescriptor[]
+): FormFieldDescriptor[] {
+  return sectionFields.filter((field) => {
+    const label = field.label ?? ""
+    if (!/budget responsibility|staff responsibility/i.test(label)) return false
+    if (field.type !== "select" && field.type !== "button-group") return false
+    return true
+  })
 }
 
 /** Where attachment data often lives under a different name than the form label. */
@@ -168,11 +188,18 @@ export function getMissingRequiredFields(
 }
 
 export function buildMissingRequiredMessage(missing: FormFieldDescriptor[]): string {
+  return buildMissingFieldsMessage(missing, "Missing required fields — call fill for each:")
+}
+
+export function buildMissingFieldsMessage(
+  missing: FormFieldDescriptor[],
+  header = "Missing fields — call fill for each:"
+): string {
   if (!missing.length) return ""
   const lines = missing.map((field) => {
     const indirect = buildIndirectAttachmentHint(field)
     const label = field.label ?? field.selector
     return indirect ? `- ${label} (${indirect})` : `- ${label}`
   })
-  return `Missing required fields — call fill for each:\n${lines.join("\n")}`
+  return `${header}\n${lines.join("\n")}`
 }

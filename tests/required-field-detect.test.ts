@@ -67,6 +67,22 @@ describe("required-field-detect", () => {
     expect(isEmptyFieldValue(field, "IR")).toBe(false)
   })
 
+  it("treats 0 as filled for Varbi budget/staff responsibility selects", () => {
+    const field: FormFieldDescriptor = {
+      selector: "#budget",
+      tag: "select",
+      type: "select",
+      label: "Work experience - Budget responsibility",
+      options: [
+        { value: "-1", label: "Choose" },
+        { value: "0", label: "No" },
+        { value: "1", label: "Yes" }
+      ]
+    }
+    expect(isEmptyFieldValue(field, "0")).toBe(false)
+    expect(isEmptyFieldValue(field, "-1")).toBe(true)
+  })
+
   it("lists missing required fields not in fill batch", () => {
     const fields: FormFieldDescriptor[] = [
       {

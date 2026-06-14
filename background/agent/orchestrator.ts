@@ -79,14 +79,16 @@ import {
 import {
   buildRepeatFillMessage,
   buildFillContinuationMessage,
-  getNextRequiredFillTarget,
-  getSessionMissingRequiredFields,
+  getNextSectionFillTarget,
+  getSessionMissingFillableFields,
   isFieldAlreadyFilled,
   seedFilledSelectorMap,
   selectorToFillAlias
 } from "~/lib/fill-progress"
 import {
-  buildMissingRequiredMessage
+  buildMissingFieldsMessage,
+  getVarbiResponsibilityDefaultFields,
+  isEmptyFieldValue
 } from "~/lib/required-field-detect"
 import { submitAddEntryAndWait } from "~/background/add-entry-submit"
 import { waitForAddEntryFormClosed, waitForAddEntryFormReady } from "~/background/add-entry-wait"
@@ -133,6 +135,7 @@ import type {
   AddEntrySectionDescriptor,
   AgentState,
   ChatMode,
+  FormFieldDescriptor,
   PageContext,
   StagedFile,
   AgentActivityStep
@@ -1255,6 +1258,10 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         }
       }
 
+      if (clickTarget?.kind === "submit") {
+        return this.handleAddEntrySubmitClick(ctx, clickTarget.section, toolContext)
+      }
+
       let toolResult = await executeTool(ctx.tabId, toolName, clickArgs, toolContext)
 
       if (!toolResult.ok) return toolResult
@@ -1398,15 +1405,16 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     }
 
     const sectionFields = getSectionFillableFields(pageContext, section.sectionLabel)
-    const missing = getSessionMissingRequiredFields(
+    await this.ensureResponsibilityDefaults(ctx, sectionFields)
+    const missing = getSessionMissingFillableFields(
       sectionFields,
       this.addEntryPartialFills,
       this.fieldAliasMap ?? undefined
     )
 
     if (missing.length) {
-      const missingMsg = buildMissingRequiredMessage(missing)
-      const next = getNextRequiredFillTarget(
+      const missingMsg = buildMissingFieldsMessage(missing)
+      const next = getNextSectionFillTarget(
         sectionFields,
         this.addEntryPartialFills,
         this.fieldAliasMap ?? undefined
@@ -1521,12 +1529,41 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       this.openAddEntrySectionLabel
     )
     return (
-      getNextRequiredFillTarget(
+      getNextSectionFillTarget(
         sectionFields,
         this.addEntryPartialFills,
         this.fieldAliasMap ?? undefined
       )?.alias ?? null
     )
+  }
+
+  private async ensureResponsibilityDefaults(
+    ctx: AgentContext,
+    sectionFields: FormFieldDescriptor[]
+  ): Promise<void> {
+    const candidates = getVarbiResponsibilityDefaultFields(sectionFields)
+    const toFill: Array<{ selector: string; value: string }> = []
+
+    for (const field of candidates) {
+      const existing = this.addEntryPartialFills.get(field.selector)
+      if (existing !== undefined && !isEmptyFieldValue(field, existing)) continue
+      toFill.push({ selector: field.selector, value: "0" })
+    }
+
+    if (!toFill.length) return
+
+    devLog("Auto-filling Varbi responsibility defaults", {
+      selectors: toFill.map((item) => item.selector)
+    })
+
+    const results = await fillFieldsSequential(ctx.tabId, toFill)
+    for (let i = 0; i < toFill.length; i++) {
+      const item = toFill[i]!
+      const result = results[i]
+      if (result?.ok) {
+        this.addEntryPartialFills.set(item.selector, item.value)
+      }
+    }
   }
 
   private async buildFillProgressResult(
@@ -1562,12 +1599,12 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     if (!section) return toolResult
 
     const sectionFields = getSectionFillableFields(pageContext, section.sectionLabel)
-    const missing = getSessionMissingRequiredFields(
+    const missing = getSessionMissingFillableFields(
       sectionFields,
       this.addEntryPartialFills,
       this.fieldAliasMap ?? undefined
     )
-    const next = getNextRequiredFillTarget(
+    const next = getNextSectionFillTarget(
       sectionFields,
       this.addEntryPartialFills,
       this.fieldAliasMap ?? undefined
@@ -1593,7 +1630,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         ...(typeof toolResult.result === "object" && toolResult.result
           ? (toolResult.result as Record<string, unknown>)
           : {}),
-        missingRequired: missing.length ? buildMissingRequiredMessage(missing) : undefined,
+        missingRequired: missing.length ? buildMissingFieldsMessage(missing) : undefined,
         nextField: next?.alias,
         filledAliases: this.buildPartialFilledAliases(pageContext),
         addEntry: {
@@ -1604,6 +1641,97 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
           nextStep
         }
       }
+    }
+  }
+
+  private async handleAddEntrySubmitClick(
+    ctx: AgentContext,
+    section: AddEntrySectionDescriptor,
+    toolContext: {
+      getPageContext: () => Promise<PageContext>
+      captureScreenshot: () => Promise<string>
+      resolveStagedFilePath: (fileId: string) => Promise<string | null>
+    }
+  ): Promise<ToolResult> {
+    const pageContext = await ctx.getPageContext()
+    const sectionFields = getSectionFillableFields(pageContext, section.sectionLabel)
+    await this.ensureResponsibilityDefaults(ctx, sectionFields)
+    const missing = getSessionMissingFillableFields(
+      sectionFields,
+      this.addEntryPartialFills,
+      this.fieldAliasMap ?? undefined
+    )
+
+    if (missing.length) {
+      const next = getNextSectionFillTarget(
+        sectionFields,
+        this.addEntryPartialFills,
+        this.fieldAliasMap ?? undefined
+      )
+      devLog("Rejected premature add-entry submit click", {
+        section: section.sectionLabel,
+        missing: missing.map((field) => field.label ?? field.selector)
+      })
+      return {
+        ok: true,
+        result: {
+          rejectedSubmit: true,
+          missingRequired: buildMissingFieldsMessage(missing),
+          addEntry: {
+            submitted: false,
+            openedNext: true,
+            sectionLabel: section.sectionLabel,
+            entryNumber: getSectionSavedCount(section),
+            nextStep: next
+              ? `Do not click Save — call fill with "${next.alias}" first. The extension auto-saves when all fields are filled.`
+              : `Do not click Save — fill remaining fields first. Missing: ${buildMissingFieldsMessage(missing)}`
+          }
+        }
+      }
+    }
+
+    const sessionFields = Array.from(this.addEntryPartialFills.entries()).map(
+      ([selector, value]) => ({ selector, value })
+    )
+
+    if (!sessionFields.length) {
+      return {
+        ok: true,
+        result: {
+          rejectedSubmit: true,
+          addEntry: {
+            submitted: false,
+            openedNext: true,
+            sectionLabel: section.sectionLabel,
+            entryNumber: getSectionSavedCount(section),
+            nextStep:
+              "Do not click Save with an empty form — call fill for each required field first."
+          }
+        }
+      }
+    }
+
+    this.lastFillFieldsSignature = buildFillFieldsSignature(sessionFields)
+    const advance = await this.advanceAddEntryAfterFill(
+      ctx,
+      sessionFields,
+      pageContext,
+      toolContext
+    )
+    this.addEntryPartialFills.clear()
+
+    if (!advance) {
+      return {
+        ok: false,
+        error: "Could not advance add-entry section after submit.",
+        result: { addEntry: { submitted: false } }
+      }
+    }
+
+    return {
+      ok: advance.submitted,
+      error: advance.error,
+      result: { addEntry: advance }
     }
   }
 

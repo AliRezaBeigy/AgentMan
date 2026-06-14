@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 
 import {
   getNextRequiredFillTarget,
+  getNextSectionFillTarget,
+  getSessionMissingFillableFields,
   getSessionMissingRequiredFields,
   isFieldAlreadyFilled,
   seedFilledSelectorMap,
@@ -73,5 +75,38 @@ describe("fill-progress", () => {
     })
     expect(msg).toContain("work:title")
     expect(msg).toContain("work:employer")
+  })
+
+  it("tracks optional section fields until filled", () => {
+    const fields: FormFieldDescriptor[] = [
+      ...sectionFields,
+      {
+        selector: "#city",
+        label: "Work experience - City",
+        type: "text",
+        required: false
+      },
+      {
+        selector: "#country",
+        label: "Work experience - Country",
+        type: "select",
+        required: false
+      }
+    ]
+    const aliasMap = new Map([
+      ...aliasToSelector,
+      ["work:city", "#city"],
+      ["work:country", "#country"]
+    ])
+    const partial = new Map([
+      ["#title", "Engineer"],
+      ["#employer", "Acme"],
+      ["#city", "Tehran"],
+      ["#budget", "0"]
+    ])
+    const missing = getSessionMissingFillableFields(fields, partial, aliasMap)
+    expect(missing).toHaveLength(1)
+    expect(missing[0]?.selector).toBe("#country")
+    expect(getNextSectionFillTarget(fields, partial, aliasMap)?.alias).toBe("work:country")
   })
 })

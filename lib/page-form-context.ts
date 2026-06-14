@@ -376,13 +376,14 @@ export function buildCompactAddEntrySystemPrompt(
   return `AgentMan. Page: ${pageContext.url}
 Use click / fill / done tools — one tool call per turn (never a JSON array in content).
 Do not write plans or explanations — call the tool immediately.
-Workflow: click section → fill each required field one at a time → auto-save → next entry.
+Workflow: click section → fill EVERY field alias listed below (one per turn) → auto-save → next entry.
 When a section form is open, call fill with ONE selector+value per turn so values appear immediately.
+Never click save/submit buttons — the extension auto-saves when all listed fields are filled.
 Sections (label|open|save):
 ${sectionLines}
 ${expectedBlock}${savedBlock}Field aliases (alias;type;REQUIRED;options;attachment hints):
 ${fieldAliases}
-REQUIRED fields must have real values (selects: never -1/Choose). Lines with "attachment:" map attachment data under different names.
+Fill every alias line above for each entry (REQUIRED marks HTML-required fields; optional lines like city/description still need values from the attachment). Selects: never -1/Choose. Lines with "attachment:" map attachment data under different names.
 Example fill: {"selector":"work:title","value":"..."}
 When every expected attachment item is saved, call done — never re-add entries already listed under "Saved entries on page".`
 }
@@ -472,11 +473,11 @@ export function buildAddEntryTurnHint(
         : ` Next: call fill with selector "${nextFillAlias}" — do NOT repeat a filled field.`
       : partialFilledAliases.length > 0
         ? textActionMode
-          ? ` All required fields for this ${openSectionLabel} item are filled — wait for auto-save or call done. Do NOT re-fill: ${partialFilledAliases.join(", ")}.`
-          : ` All required fields for this ${openSectionLabel} item are filled — wait for auto-save or call done. Do NOT re-fill fields already listed above.`
+          ? ` All fields for this ${openSectionLabel} item are filled — wait for auto-save or call done. Do NOT re-fill: ${partialFilledAliases.join(", ")}.`
+          : ` All fields for this ${openSectionLabel} item are filled — wait for auto-save or call done. Do NOT re-fill fields already listed above.`
         : textActionMode
-          ? ` Return {"action":"fill","selector":"<alias>","value":"..."} for the NEXT required field of the unsaved ${openSectionLabel} item — one field per turn. Do NOT click Add again or re-add entries already saved.`
-          : ` Call fill (one field at a time) for the NEXT required field of the unsaved ${openSectionLabel} item. Do NOT click Add again or re-add entries already saved.`
+          ? ` Return {"action":"fill","selector":"<alias>","value":"..."} for the NEXT field of the unsaved ${openSectionLabel} item — one field per turn. Do NOT click Save/Submit or Add again.`
+          : ` Call fill (one field at a time) for the NEXT field of the unsaved ${openSectionLabel} item. Do NOT click Save/Submit or Add again.`
 
     return `${ADD_ENTRY_TURN_HINT_PREFIX} ${openSectionLabel} form is open.${progressSuffix}${filledHint}${nextHint}`
   }

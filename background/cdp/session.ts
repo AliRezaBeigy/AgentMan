@@ -3,10 +3,43 @@ const CDP_VERSION = "1.3"
 export class CdpSession {
   private tabId: number | null = null
 
+  private isDetachError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return /not attached|target closed|invalid tab|detached|No tab with id/i.test(message)
+  }
+
   async attach(tabId: number): Promise<void> {
-    if (this.tabId === tabId) return
+    if (this.tabId === tabId) {
+      try {
+        await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+          expression: "1",
+          returnByValue: true
+        })
+        return
+      } catch (error) {
+        if (!this.isDetachError(error)) throw error
+        this.tabId = null
+      }
+    }
+
     await this.detach()
-    await chrome.debugger.attach({ tabId }, CDP_VERSION)
+
+    try {
+      await chrome.debugger.attach({ tabId }, CDP_VERSION)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/another debugger|already attached/i.test(message)) {
+        try {
+          await chrome.debugger.detach({ tabId })
+        } catch {
+          /* ignore */
+        }
+        await chrome.debugger.attach({ tabId }, CDP_VERSION)
+      } else {
+        throw error
+      }
+    }
+
     this.tabId = tabId
   }
 
@@ -28,8 +61,22 @@ export class CdpSession {
     if (this.tabId == null) {
       throw new Error("CDP session not attached")
     }
-    const result = await chrome.debugger.sendCommand({ tabId: this.tabId }, method, params ?? {})
-    return result as T
+
+    try {
+      const result = await chrome.debugger.sendCommand(
+        { tabId: this.tabId },
+        method,
+        params ?? {}
+      )
+      return result as T
+    } catch (error) {
+      if (!this.isDetachError(error)) throw error
+      const tabId = this.tabId
+      this.tabId = null
+      await this.attach(tabId)
+      const result = await chrome.debugger.sendCommand({ tabId }, method, params ?? {})
+      return result as T
+    }
   }
 
   async clickAt(x: number, y: number): Promise<void> {

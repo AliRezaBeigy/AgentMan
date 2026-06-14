@@ -1,6 +1,6 @@
 import type { FormFieldDescriptor } from "~/lib/types"
 import {
-  buildMissingRequiredMessage,
+  buildMissingFieldsMessage,
   isEmptyFieldValue
 } from "~/lib/required-field-detect"
 
@@ -78,17 +78,47 @@ export function getSessionMissingRequiredFields(
   })
 }
 
+/** All section fields not yet filled in this add-entry session (ignores stale DOM values). */
+export function getSessionMissingFillableFields(
+  sectionFields: FormFieldDescriptor[],
+  partialFills: ReadonlyMap<string, string>,
+  aliasToSelector?: ReadonlyMap<string, string>
+): FormFieldDescriptor[] {
+  return sectionFields.filter((field) => {
+    const value = resolvePartialFillValue(field, partialFills, aliasToSelector)
+    if (value === undefined) return true
+    return isEmptyFieldValue(field, value)
+  })
+}
+
 /** First required field in the section that is not filled yet. */
 export function getNextRequiredFillTarget(
   sectionFields: FormFieldDescriptor[],
   partialFills: ReadonlyMap<string, string>,
   aliasToSelector?: ReadonlyMap<string, string>
 ): NextFillTarget | null {
-  const missing = getSessionMissingRequiredFields(
-    sectionFields,
-    partialFills,
+  return pickNextFillTarget(
+    getSessionMissingRequiredFields(sectionFields, partialFills, aliasToSelector),
     aliasToSelector
   )
+}
+
+/** First section field (required or optional) that is not filled yet. */
+export function getNextSectionFillTarget(
+  sectionFields: FormFieldDescriptor[],
+  partialFills: ReadonlyMap<string, string>,
+  aliasToSelector?: ReadonlyMap<string, string>
+): NextFillTarget | null {
+  return pickNextFillTarget(
+    getSessionMissingFillableFields(sectionFields, partialFills, aliasToSelector),
+    aliasToSelector
+  )
+}
+
+function pickNextFillTarget(
+  missing: FormFieldDescriptor[],
+  aliasToSelector?: ReadonlyMap<string, string>
+): NextFillTarget | null {
   const next = missing[0]
   if (!next) return null
 
@@ -108,7 +138,7 @@ export function buildRepeatFillMessage(
   if (next) {
     return `"${filledAlias}" is already filled. Continue with the remaining required fields.`
   }
-  return `"${filledAlias}" is already filled. All required fields have values — wait for auto-save or call done.`
+  return `"${filledAlias}" is already filled. All fields have values — wait for auto-save or call done.`
 }
 
 export function buildFillContinuationMessage(
@@ -117,7 +147,7 @@ export function buildFillContinuationMessage(
   next: NextFillTarget | null,
   aliasToSelector?: ReadonlyMap<string, string>
 ): string {
-  const missingMsg = buildMissingRequiredMessage(missing)
+  const missingMsg = buildMissingFieldsMessage(missing)
   if (next) {
     const lines = [
       `Filled ${partialCount} field(s) so far.`,
