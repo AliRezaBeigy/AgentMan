@@ -1,0 +1,103 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Run tests (CI — no Ollama integration)
+        run: yarn test:ci
+
+      - name: Build extension
+        run: yarn build
+
+      - name: Package extension (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: yarn package
+
+      - name: Verify package output (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          ZIP="build/chrome-mv3-prod.zip"
+          if [ ! -f "$ZIP" ]; then
+            echo "::error::Expected package not found: $ZIP"
+            ls -la build/ || true
+            exit 1
+          fi
+          ls -la "$ZIP"
+
+      - name: Upload extension artifact (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentman-extension
+          path: build/chrome-mv3-prod.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Extract changelog for tag
+        run: |
+          TAG="${{ github.ref_name }}"
+          awk -v tag="$TAG" '
+            $0 ~ "^## \\[" tag "\\]" { found=1; print; next }
+            found && $0 ~ /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "::warning::No CHANGELOG section for ${TAG}; using tag name only."
+            echo "## ${TAG}" > release_notes.md
+            echo "" >> release_notes.md
+            echo "See [CHANGELOG.md](CHANGELOG.md) for details." >> release_notes.md
+          fi
+          echo "--- release notes ---"
+          cat release_notes.md
+
+      - name: Download extension artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agentman-extension
+          path: dist
+
+      - name: Prepare release file
+        run: |
+          TAG="${{ github.ref_name }}"
+          cp dist/chrome-mv3-prod.zip "agentman-${TAG}.zip"
+          ls -la "agentman-${TAG}.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: agentman-${{ github.ref_name }}.zip
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

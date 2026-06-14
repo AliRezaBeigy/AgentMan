@@ -87,7 +87,7 @@ describe("buildAddEntryTurnHint", () => {
     )
 
     expect(hint).toContain(ADD_ENTRY_TURN_HINT_PREFIX)
-    expect(hint).toContain("All required fields")
+    expect(hint).toContain("All fields")
     expect(hint).toContain("wait for auto-save")
     expect(hint).not.toContain("NEXT required field")
   })
