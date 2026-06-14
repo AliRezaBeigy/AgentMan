@@ -1,7 +1,7 @@
 {
   "name": "agentman",
   "displayName": "AgentMan",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Local Ollama-powered AI form filler and browser agent",
   "author": "AgentMan",
   "scripts": {
@@ -50,21 +50,12 @@
     "permissions": [
       "storage",
       "sidePanel",
-      "activeTab",
       "tabs",
-      "contextMenus",
       "debugger",
-      "notifications",
       "declarativeNetRequest"
     ],
     "host_permissions": [
-      "<all_urls>",
-      "http://*/api/tags",
-      "http://*/api/chat",
-      "http://*/api/generate",
-      "https://*/api/tags",
-      "https://*/api/chat",
-      "https://*/api/generate"
+      "<all_urls>"
     ],
     "commands": {
       "open-sidepanel": {
