@@ -94,6 +94,11 @@ import { openAddEntrySection } from "~/lib/add-entry-open"
 import { executeTool, fillFieldsSequential, type ToolResult } from "~/background/tools/executor"
 import { resolveAgentClickArgs } from "~/lib/add-entry-timing"
 import { chat, ChatAbortedError, OllamaToolsNotSupportedError, type OllamaMessage } from "~/lib/ollama/client"
+import {
+  AGENT_CHAT_THINK,
+  AGENT_NO_THINK_SUFFIX,
+  agentChatOptions
+} from "~/lib/ollama/thinking"
 import type { OllamaToolCall } from "~/lib/types"
 import {
   appendTextActionInstructions,
@@ -322,7 +327,7 @@ class AgentController {
       const { aliasToSelector } = buildFillFieldAliasRegistry(pageContext, lastUserMessage)
       this.fieldAliasMap = aliasToSelector
       const agentMessages: OllamaMessage[] = [
-        { role: "system", content: buildCompactAddEntrySystemPrompt(pageContext, lastUserMessage) },
+        { role: "system", content: buildCompactAddEntrySystemPrompt(pageContext, lastUserMessage) + AGENT_NO_THINK_SUFFIX },
         ...messages.filter((m) => m.role !== "system")
       ]
       const settings = await getSettings()
@@ -835,7 +840,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         thinkingTrace += delta
         ctx.onAgentStep?.({
           id: thinkingStepId(iteration),
-          label: `Step ${iteration}: Thinking…`,
+          label: `Step ${iteration}: Choosing action…`,
           status: "running",
           detail: thinkingTrace
         })
@@ -849,18 +854,17 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
           tools: textActionMode ? undefined : AGENT_TOOLS,
           stream: true,
           keepAlive,
-          think: true,
+          think: AGENT_CHAT_THINK,
+          options: textActionMode ? undefined : agentChatOptions(),
           format: textActionMode ? buildTextActionJsonSchema() : undefined,
           shouldAbort: textActionMode
             ? (content) => looksLikeRootActionArrayStarting(content)
             : undefined,
-          onThinkingChunk: appendThinkingTrace,
+          onThinkingChunk: AGENT_CHAT_THINK ? appendThinkingTrace : undefined,
           onChunk: (delta) => {
             stepContent += delta
             if (textActionMode) {
               ctx.onStream(delta)
-            } else {
-              appendThinkingTrace(delta)
             }
             if (
               !textActionMode &&
@@ -1064,7 +1068,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         break
       }
 
-      if (i === 0 && text && !textActionMode) {
+      if (i === 0 && text && !textActionMode && !options.addEntryMode) {
         ctx.onStream(`\n\n**Plan:** ${text}\n\n`)
       }
 
@@ -1820,7 +1824,7 @@ function buildSystemPrompt(mode: ChatMode, pageContext: PageContext): string {
     const contextNote = buildPageContextNote(pageContext, 1200)
     return `${base} You fill web forms by returning JSON values for each field key provided in the instructions.${contextNote}`
   }
-  return buildAgentSystemPrompt(pageContext)
+  return buildAgentSystemPrompt(pageContext) + AGENT_NO_THINK_SUFFIX
 }
 
 function sleep(ms: number): Promise<void> {

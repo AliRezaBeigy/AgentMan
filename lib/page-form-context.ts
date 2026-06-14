@@ -375,6 +375,7 @@ export function buildCompactAddEntrySystemPrompt(
 
   return `AgentMan. Page: ${pageContext.url}
 Use click / fill / done tools — one tool call per turn (never a JSON array in content).
+Do not write plans or explanations — call the tool immediately.
 Workflow: click section → fill each required field one at a time → auto-save → next entry.
 When a section form is open, call fill with ONE selector+value per turn so values appear immediately.
 Sections (label|open|save):

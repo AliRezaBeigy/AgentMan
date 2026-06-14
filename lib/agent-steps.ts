@@ -34,7 +34,7 @@ export function toolStepId(iteration: number, toolIndex: number): string {
 export function buildThinkingStep(iteration: number): AgentActivityStep {
   return {
     id: thinkingStepId(iteration),
-    label: `Step ${iteration}: Thinking…`,
+    label: `Step ${iteration}: Choosing action…`,
     status: "running"
   }
 }
