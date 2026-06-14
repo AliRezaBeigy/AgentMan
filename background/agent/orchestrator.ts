@@ -1,4 +1,14 @@
 import {
+  buildAssistantHistoryMessage
+} from "~/lib/agent-history"
+import {
+  buildThinkingStep,
+  buildToolRunningStep,
+  formatAgentToolStepLabel,
+  thinkingStepId,
+  toolStepId
+} from "~/lib/agent-steps"
+import {
   compactToolResultForAgent,
   formatAgentToolResultMessage,
   formatCompactAgentToolResultMessage
@@ -21,7 +31,6 @@ import {
   assistantClaimsTaskComplete,
   buildAgentContinuationNudge,
   buildFalseCompletionNudge,
-  buildFalseCompletionNudge,
   buildAgentSystemPrompt,
   buildCompactAddEntrySystemPrompt,
   buildAddEntryTurnHint,
@@ -41,7 +50,6 @@ import {
 import {
   buildAddEntryAdvanceMessage,
   buildFillFieldsSignature,
-  buildPostFillValueMap,
   findAddEntrySectionForFilledFields,
   pickCssSelector,
   type FilledFieldRef
@@ -69,20 +77,29 @@ import {
   findDuplicateSavedEntry
 } from "~/lib/add-entry-duplicate"
 import {
-  buildMissingRequiredMessage,
-  getMissingRequiredFields
+  buildRepeatFillMessage,
+  buildFillContinuationMessage,
+  getNextRequiredFillTarget,
+  getSessionMissingRequiredFields,
+  isFieldAlreadyFilled,
+  seedFilledSelectorMap,
+  selectorToFillAlias
+} from "~/lib/fill-progress"
+import {
+  buildMissingRequiredMessage
 } from "~/lib/required-field-detect"
 import { submitAddEntryAndWait } from "~/background/add-entry-submit"
 import { waitForAddEntryFormClosed, waitForAddEntryFormReady } from "~/background/add-entry-wait"
 import { openAddEntrySection } from "~/lib/add-entry-open"
-import { executeTool, type ToolResult } from "~/background/tools/executor"
+import { executeTool, fillFieldsSequential, type ToolResult } from "~/background/tools/executor"
 import { resolveAgentClickArgs } from "~/lib/add-entry-timing"
 import { chat, ChatAbortedError, OllamaToolsNotSupportedError, type OllamaMessage } from "~/lib/ollama/client"
+import type { OllamaToolCall } from "~/lib/types"
 import {
   appendTextActionInstructions,
   buildMultiActionRejectionMessage,
   buildTextActionJsonSchema,
-  buildTextActionRetryMessage,
+  buildTextActionRetryMessageForContent,
   countTextActionsInContent,
   looksLikeActionArray,
   looksLikeFailedTextAction,
@@ -93,7 +110,17 @@ import {
 import { AGENT_TOOLS } from "~/lib/ollama/tools"
 import { expandSnippetsInText } from "~/lib/snippets"
 import { getSettings } from "~/lib/storage"
-import { extractCompleteFillFieldsFromStream, filterFieldsNotYetFilled } from "~/lib/streaming-fill"
+import {
+  extractFillFieldsFromToolArguments,
+  extractSingleFillFromToolArguments,
+  markFieldFilled
+} from "~/lib/fill-sequential"
+import {
+  extractCompleteFillFromStream,
+  extractCompleteFillObjectEntriesFromStream,
+  looksLikeFillFieldsStream,
+  type StreamFillField
+} from "~/lib/streaming-fill"
 import { sendToPageTab } from "~/lib/tab-messaging"
 import { MessageType, type ChatHistoryEntry } from "~/lib/messages"
 import { buildStagedFilesContextNote } from "~/lib/staged-files"
@@ -102,7 +129,8 @@ import type {
   AgentState,
   ChatMode,
   PageContext,
-  StagedFile
+  StagedFile,
+  AgentActivityStep
 } from "~/lib/types"
 
 export interface AgentLoopOptions {
@@ -118,6 +146,7 @@ export interface AgentContext {
   captureScreenshot: () => Promise<string>
   resolveStagedFilePath: (fileId: string) => Promise<string | null>
   onStream: (delta: string) => void
+  onAgentStep?: (step: AgentActivityStep) => void
   onDone: (content: string) => void
   onError: (error: string) => void
 }
@@ -135,6 +164,8 @@ class AgentController {
   private openAddEntrySectionLabel: string | null = null
   private addEntryUserMessage: string | null = null
   private fieldAliasMap: Map<string, string> | null = null
+  /** Resolved selector → value for the current add-entry form (one fill per turn). */
+  private addEntryPartialFills = new Map<string, string>()
   /** Models that returned "does not support tools" — use JSON text actions instead. */
   private readonly toolsSupportCache = new Map<string, boolean>()
 
@@ -346,8 +377,36 @@ class AgentController {
     let lastRaw = ""
 
     const maxAttempts = 4
+    const requiredKeySet = () => new Set(requiredKeys)
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      lastRaw = await this.requestFillJson(host, model, fillMessages)
+      const applyPartialFill = async (partial: Record<string, unknown>) => {
+        mergeFillObject(mergedValues, partial)
+        pruneInvalidFillKeys(mergedValues)
+
+        await this.ensureRowsForMergedValues(ctx.tabId, mergedValues)
+        const freshFields = await this.refreshFillableFields(ctx.tabId)
+        if (freshFields.length) {
+          fillable = freshFields
+          fillableCount = fillable.length
+          requiredKeys = fillable.map((f, i) => fieldFillKey(f, i))
+        }
+
+        const attemptMappings = parseFillMappings(JSON.stringify(mergedValues), fillable)
+        accumulated.clear()
+        for (const mapping of attemptMappings) {
+          accumulated.set(mapping.selector, mapping)
+        }
+
+        await this.applyFillMappingsIncremental(ctx.tabId, accumulated, appliedSelectors)
+      }
+
+      lastRaw = await this.requestFillJsonStreaming(
+        host,
+        model,
+        fillMessages,
+        requiredKeySet(),
+        applyPartialFill
+      )
       const parsed = extractJsonValue(lastRaw)
       const normalized = normalizeFillResponse(parsed, fillable)
 
@@ -553,6 +612,154 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     return result.content
   }
 
+  /** Stream fill JSON and invoke onPartial as each top-level key completes. */
+  private async requestFillJsonStreaming(
+    host: string,
+    model: string,
+    messages: OllamaMessage[],
+    allowedKeys: ReadonlySet<string>,
+    onPartial: (entries: Record<string, unknown>) => Promise<void>
+  ): Promise<string> {
+    let raw = ""
+    const appliedKeys = new Set<string>()
+    let applyChain = Promise.resolve()
+
+    await chat({
+      host,
+      model,
+      messages,
+      stream: true,
+      format: "json",
+      options: { temperature: 0 },
+      onChunk: (delta) => {
+        raw += delta
+        const entries = extractCompleteFillObjectEntriesFromStream(
+          raw,
+          appliedKeys,
+          allowedKeys.size > 0 ? allowedKeys : undefined
+        )
+        if (!entries.length) return
+
+        const partial: Record<string, unknown> = {}
+        for (const entry of entries) {
+          partial[entry.key] = entry.value
+          appliedKeys.add(entry.key)
+        }
+
+        applyChain = applyChain.then(() => onPartial(partial))
+      }
+    })
+
+    await applyChain
+    return raw
+  }
+
+  private queueStreamFieldFills(
+    ctx: AgentContext,
+    fields: StreamFillField[],
+    streamFilledSelectors: Map<string, string>,
+    streamFillChain: { promise: Promise<void> },
+    iteration: number,
+    openSectionLabel: string | null
+  ): void {
+    for (const field of fields) {
+      streamFillChain.promise = streamFillChain.promise.then(async () => {
+        try {
+          const pageContext = await ctx.getPageContext()
+          const candidates = openSectionLabel
+            ? getSectionFillableFields(pageContext, openSectionLabel)
+            : pageContext.fields
+          const selector =
+            resolveFillFieldSelector(field.selector, candidates, this.fieldAliasMap ?? undefined) ??
+            field.selector
+
+          const results = await fillFieldsSequential(ctx.tabId, [
+            { selector, value: field.value }
+          ])
+          const applied = results[0]
+          if (!applied?.ok) {
+            devLog("Stream fill failed", { field, selector, error: applied?.error })
+            return
+          }
+
+          markFieldFilled(streamFilledSelectors, field.selector, selector, field.value)
+          this.addEntryPartialFills.set(selector, field.value)
+          this.state = {
+            status: "running",
+            iteration,
+            currentAction: `Filling field (${streamFilledSelectors.size})`
+          }
+          this.broadcastState()
+        } catch (error) {
+          devLog("Stream fill failed", { field, error })
+        }
+      })
+    }
+  }
+
+  private processStreamFillContent(
+    ctx: AgentContext,
+    content: string,
+    streamFilledSelectors: Map<string, string>,
+    streamFillChain: { promise: Promise<void> },
+    iteration: number,
+    openSectionLabel: string | null
+  ): void {
+    const field = extractCompleteFillFromStream(content, streamFilledSelectors)
+    if (!field) return
+    this.queueStreamFieldFills(
+      ctx,
+      [field],
+      streamFilledSelectors,
+      streamFillChain,
+      iteration,
+      openSectionLabel
+    )
+  }
+
+  private processStreamFillToolCalls(
+    ctx: AgentContext,
+    toolCalls: OllamaToolCall[],
+    streamFilledSelectors: Map<string, string>,
+    streamFillChain: { promise: Promise<void> },
+    iteration: number,
+    openSectionLabel: string | null
+  ): void {
+    for (const call of toolCalls) {
+      if (call.function.name === "fill_fields") {
+        const batch = extractFillFieldsFromToolArguments(
+          call.function.arguments,
+          streamFilledSelectors
+        )
+        if (batch.length > 1) continue
+        if (batch.length === 1) {
+          this.queueStreamFieldFills(
+            ctx,
+            [batch[0]!],
+            streamFilledSelectors,
+            streamFillChain,
+            iteration,
+            openSectionLabel
+          )
+        }
+        continue
+      }
+
+      if (call.function.name !== "fill") continue
+      const field = extractSingleFillFromToolArguments(call.function.arguments)
+      if (!field || streamFilledSelectors.get(field.selector) === field.value) continue
+      devLog("Stream fill from tool call", { selector: field.selector })
+      this.queueStreamFieldFills(
+        ctx,
+        [field],
+        streamFilledSelectors,
+        streamFillChain,
+        iteration,
+        openSectionLabel
+      )
+    }
+  }
+
   private async runAgentLoop(
     ctx: AgentContext,
     messages: OllamaMessage[],
@@ -570,6 +777,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     this.lastAgentToolName = null
     this.openAddEntrySectionLabel = null
     this.addEntryUserMessage = null
+    this.addEntryPartialFills.clear()
     let continuationNudges = 0
     const maxContinuationNudges = 12
     let textActionMode = this.toolsSupportCache.get(model) === false
@@ -606,18 +814,32 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       }
       this.broadcastState()
 
+      const iteration = i + 1
+      ctx.onAgentStep?.(buildThinkingStep(iteration))
+
       if (options.addEntryMode) {
         await this.injectAddEntryTurnHint(ctx, messages, textActionMode)
       }
 
       let stepContent = ""
-      let streamFillChain = Promise.resolve()
-      const streamFilledSelectors = new Map<string, string>()
-      let iterationPageContext: PageContext | null = null
-      if (options.addEntryMode && this.openAddEntrySectionLabel) {
-        iterationPageContext = await ctx.getPageContext()
-      }
+      let thinkingTrace = ""
+      const streamFillChain = { promise: Promise.resolve() as Promise<void> }
+      const streamFilledSelectors = seedFilledSelectorMap(
+        this.addEntryPartialFills,
+        this.fieldAliasMap ?? undefined
+      )
       let result: Awaited<ReturnType<typeof chat>>
+
+      const appendThinkingTrace = (delta: string) => {
+        if (!delta) return
+        thinkingTrace += delta
+        ctx.onAgentStep?.({
+          id: thinkingStepId(iteration),
+          label: `Step ${iteration}: Thinking…`,
+          status: "running",
+          detail: thinkingTrace
+        })
+      }
 
       try {
         result = await chat({
@@ -627,48 +849,45 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
           tools: textActionMode ? undefined : AGENT_TOOLS,
           stream: true,
           keepAlive,
+          think: true,
           format: textActionMode ? buildTextActionJsonSchema() : undefined,
           shouldAbort: textActionMode
             ? (content) => looksLikeRootActionArrayStarting(content)
             : undefined,
+          onThinkingChunk: appendThinkingTrace,
           onChunk: (delta) => {
             stepContent += delta
-            ctx.onStream(delta)
-            if (!options.addEntryMode || !textActionMode) return
-            const newFields = extractCompleteFillFieldsFromStream(
-              stepContent,
-              streamFilledSelectors
-            )
-            if (!newFields.length) return
-            for (const field of newFields) {
-              streamFillChain = streamFillChain.then(async () => {
-                try {
-                  const candidates = this.openAddEntrySectionLabel
-                    ? getSectionFillableFields(
-                        iterationPageContext ?? (await ctx.getPageContext()),
-                        this.openAddEntrySectionLabel!
-                      )
-                    : (iterationPageContext ?? (await ctx.getPageContext())).fields
-                  const selector =
-                    resolveFillFieldSelector(
-                      field.selector,
-                      candidates,
-                      this.fieldAliasMap ?? undefined
-                    ) ?? field.selector
-                  await cdpSession.attach(ctx.tabId)
-                  await cdpSession.fillSelector(selector, field.value)
-                  streamFilledSelectors.set(selector, field.value)
-                  this.state = {
-                    status: "running",
-                    iteration: i + 1,
-                    currentAction: `Filling field (${streamFilledSelectors.size})`
-                  }
-                  this.broadcastState()
-                } catch (error) {
-                  devLog("Stream fill failed", { field, error })
-                }
-              })
+            if (textActionMode) {
+              ctx.onStream(delta)
+            } else {
+              appendThinkingTrace(delta)
             }
+            if (
+              !textActionMode &&
+              !options.addEntryMode &&
+              !looksLikeFillFieldsStream(stepContent)
+            ) {
+              return
+            }
+            this.processStreamFillContent(
+              ctx,
+              stepContent,
+              streamFilledSelectors,
+              streamFillChain,
+              i + 1,
+              this.openAddEntrySectionLabel
+            )
+          },
+          onToolCallDelta: (toolCalls) => {
+            if (textActionMode) return
+            this.processStreamFillToolCalls(
+              ctx,
+              toolCalls,
+              streamFilledSelectors,
+              streamFillChain,
+              i + 1,
+              this.openAddEntrySectionLabel
+            )
           }
         })
         if (!textActionMode) {
@@ -696,7 +915,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         throw error
       }
 
-      await streamFillChain
+      await streamFillChain.promise
 
       const text = result.content || stepContent
 
@@ -707,12 +926,14 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
             args: normalizeToolArguments(call.function.arguments ?? {})
           }))
 
+      toolCalls = normalizeAgentToolCalls(toolCalls)
+
       let parsedTextActionFallback = false
       if (!toolCalls.length && !textActionMode) {
         const fallback = textActionToToolCalls(text)
         if (fallback.length) {
           parsedTextActionFallback = true
-          toolCalls = fallback
+          toolCalls = normalizeAgentToolCalls(fallback)
           devLog("Parsed text action when native tool_calls were empty", {
             text: text.slice(0, 120),
             tool: fallback[0]?.name
@@ -730,7 +951,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         if (textActionMode && looksLikeFailedTextAction(text)) {
           devLog("Text action parse failed", { text: text.slice(0, 200) })
           messages.push({ role: "assistant", content: text })
-          messages.push({ role: "user", content: buildTextActionRetryMessage() })
+          messages.push({ role: "user", content: buildTextActionRetryMessageForContent(text) })
           continue
         }
 
@@ -773,7 +994,8 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
           options.addEntryMode &&
           continuationNudges < maxContinuationNudges &&
           (assistantTurnNeedsToolFollowUp(text) ||
-            (textActionMode && textActionNeedsFollowUp(text)))
+            (textActionMode && textActionNeedsFollowUp(text)) ||
+            !text.trim())
         ) {
           continuationNudges++
           devLog("Agent continuation nudge", { continuationNudges, text: text.slice(0, 120) })
@@ -808,6 +1030,15 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         devLog("Text action parsed", { calls: toolCalls })
       }
 
+      ctx.onAgentStep?.({
+        id: thinkingStepId(iteration),
+        label: toolCalls.length
+          ? `Step ${iteration}: Planned next action`
+          : `Step ${iteration}: Responding…`,
+        status: "done",
+        detail: thinkingTrace.trim() || undefined
+      })
+
       const doneCall = toolCalls.find((c) => c.name === "done")
       if (doneCall) {
         if (options.addEntryMode) {
@@ -837,15 +1068,21 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         ctx.onStream(`\n\n**Plan:** ${text}\n\n`)
       }
 
-      messages.push({
-        role: "assistant",
-        content: compactAssistantTurn(text, toolCalls, Boolean(options.addEntryMode), textActionMode)
-      })
+      messages.push(
+        buildAssistantHistoryMessage(
+          text,
+          toolCalls,
+          Boolean(options.addEntryMode),
+          textActionMode
+        )
+      )
 
-      for (const call of toolCalls) {
+      for (let ti = 0; ti < toolCalls.length; ti++) {
+        const call = toolCalls[ti]!
         if (this.abort) break
         const toolName = call.name
         const args = call.args
+        ctx.onAgentStep?.(buildToolRunningStep(iteration, ti, toolName, args))
         this.state = {
           status: "running",
           iteration: i + 1,
@@ -859,10 +1096,17 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         })
 
         const compactResult = compactToolResultForAgent(toolName, toolResult)
-        let resultMessage =
+        const resultMessage =
           options.addEntryMode
             ? formatCompactAgentToolResultMessage(toolName, toolResult)
             : formatAgentToolResultMessage(toolName, toolResult)
+
+        ctx.onAgentStep?.({
+          id: toolStepId(iteration, ti),
+          label: formatAgentToolStepLabel(toolName, args),
+          status: toolResult.ok ? "done" : "error",
+          detail: resultMessage
+        })
 
         if (textActionMode) {
           messages.push({
@@ -907,7 +1151,9 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       this.addEntrySessionCounts,
       textActionMode,
       this.addEntryUserMessage ?? undefined,
-      this.addEntryBaselineCounts
+      this.addEntryBaselineCounts,
+      this.buildPartialFilledAliases(pageContext),
+      this.getNextFillAliasForOpenSection(pageContext)
     )
 
     const existingIndex = messages.findIndex(
@@ -963,6 +1209,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         const alreadyOpen = await waitForAddEntryFormReady(ctx.tabId, clickTarget.section, 500)
         if (alreadyOpen) {
           this.openAddEntrySectionLabel = clickTarget.section.sectionLabel
+          this.addEntryPartialFills.clear()
           return {
             ok: true,
             result: {
@@ -982,6 +1229,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         const opened = await openAddEntrySection(ctx.tabId, clickTarget.section)
         if (opened) {
           this.openAddEntrySectionLabel = clickTarget.section.sectionLabel
+          this.addEntryPartialFills.clear()
         } else {
           this.openAddEntrySectionLabel = null
         }
@@ -1020,148 +1268,222 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       }
     }
 
-    if (toolName !== "fill_fields") {
-      return executeTool(ctx.tabId, toolName, args, toolContext)
+    if (toolName === "fill" || toolName === "fill_fields") {
+      return this.executeFillTool(ctx, toolName, args, toolContext, options)
     }
 
+    return executeTool(ctx.tabId, toolName, args, toolContext)
+  }
+
+  private async executeFillTool(
+    ctx: AgentContext,
+    toolName: string,
+    args: Record<string, unknown>,
+    toolContext: {
+      getPageContext: () => Promise<PageContext>
+      captureScreenshot: () => Promise<string>
+      resolveStagedFilePath: (fileId: string) => Promise<string | null>
+    },
+    options: { contentHint?: string; streamFilled?: Map<string, string> } = {}
+  ): Promise<ToolResult> {
     const streamFilled = options.streamFilled ?? new Map<string, string>()
-    const parsedFields = parseFillFieldsArg(args.fields)
+
+    let rawFields: Array<{ selector: string; value: string }> = []
+    if (toolName === "fill") {
+      const selector = String(args.selector ?? "").trim()
+      const value = String(args.value ?? "")
+      if (selector && value) rawFields = [{ selector, value }]
+    } else {
+      rawFields = parseFillFieldsArg(args.fields)
+      if (rawFields.length > 1) {
+        return {
+          ok: false,
+          error:
+            "Use fill with ONE selector and value per turn — do not batch multiple fields in fill_fields.",
+          result: { rejectedBatch: true, fieldCount: rawFields.length }
+        }
+      }
+    }
+
+    if (!rawFields.length) {
+      return {
+        ok: false,
+        error: "fill requires selector and value from the attachment.",
+        result: { parseError: true }
+      }
+    }
+
     const pageContextBeforeFill = await ctx.getPageContext()
     const sectionLabel =
       this.openAddEntrySectionLabel ??
-      findAddEntrySectionForFilledFields(
-        parsedFields.length
-          ? parsedFields
-          : Array.from(streamFilled.entries()).map(([selector, value]) => ({ selector, value })),
-        pageContextBeforeFill
-      )?.sectionLabel ??
+      findAddEntrySectionForFilledFields(rawFields, pageContextBeforeFill)?.sectionLabel ??
       null
 
-    const resolvedParsed = resolveFillFieldMappings(
-      parsedFields,
+    const resolved = resolveFillFieldMappings(
+      rawFields,
       pageContextBeforeFill,
       sectionLabel,
       this.fieldAliasMap ?? undefined
     )
-    const resolvedStreamed = Array.from(streamFilled.entries()).map(([selector, value]) => ({
-      selector,
-      value
-    }))
-    const fields =
-      resolvedParsed.length > 0
-        ? resolvedParsed
-        : resolvedStreamed
-    const remaining = filterFieldsNotYetFilled(resolvedParsed, streamFilled)
+    const field = resolved[0]
+    if (!field) {
+      return {
+        ok: false,
+        error: "Could not resolve field selector.",
+        result: { parseError: true }
+      }
+    }
 
-    const signature = buildFillFieldsSignature(fields)
+    const sourceSelector = rawFields[0]!.selector
+    const persistedFilled = seedFilledSelectorMap(
+      this.addEntryPartialFills,
+      this.fieldAliasMap ?? undefined
+    )
+    for (const [key, value] of streamFilled) persistedFilled.set(key, value)
+
+    if (isFieldAlreadyFilled(sourceSelector, field.selector, field.value, persistedFilled)) {
+      return this.buildFillProgressResult(ctx, field, sourceSelector, {
+        filled: 0,
+        skipped: true,
+        repeatFill: true
+      })
+    }
+
+    const results = await fillFieldsSequential(ctx.tabId, [field], (progress) => {
+      this.state = {
+        status: "running",
+        iteration: this.state.iteration,
+        currentAction: `Filling field ${progress.index}/${progress.total}`
+      }
+      this.broadcastState()
+    })
+    const applied = results[0]
+    if (!applied?.ok) {
+      return {
+        ok: false,
+        error: applied?.error ?? "Fill failed",
+        result: { filled: 0, results }
+      }
+    }
+
+    markFieldFilled(streamFilled, rawFields[0]!.selector, field.selector, field.value)
+    this.addEntryPartialFills.set(field.selector, field.value)
+
+    const sessionFields = Array.from(this.addEntryPartialFills.entries()).map(
+      ([selector, value]) => ({ selector, value })
+    )
+
+    let toolResult: ToolResult = {
+      ok: true,
+      result: {
+        filled: 1,
+        selector: field.selector,
+        value: field.value,
+        partialCount: sessionFields.length
+      }
+    }
+
+    const pageContext = await ctx.getPageContext()
+    const section =
+      (sectionLabel
+        ? pageContext.addEntrySections?.find((item) => item.sectionLabel === sectionLabel)
+        : null) ?? findAddEntrySectionForFilledFields(sessionFields, pageContext)
+
+    if (!section) {
+      return toolResult
+    }
+
+    const sectionFields = getSectionFillableFields(pageContext, section.sectionLabel)
+    const missing = getSessionMissingRequiredFields(
+      sectionFields,
+      this.addEntryPartialFills,
+      this.fieldAliasMap ?? undefined
+    )
+
+    if (missing.length) {
+      const missingMsg = buildMissingRequiredMessage(missing)
+      const next = getNextRequiredFillTarget(
+        sectionFields,
+        this.addEntryPartialFills,
+        this.fieldAliasMap ?? undefined
+      )
+      toolResult = {
+        ...toolResult,
+        result: {
+          ...(typeof toolResult.result === "object" && toolResult.result
+            ? (toolResult.result as Record<string, unknown>)
+            : {}),
+          missingRequired: missingMsg,
+          nextField: next?.alias,
+          filledAliases: this.buildPartialFilledAliases(pageContext),
+          addEntry: {
+            submitted: false,
+            openedNext: true,
+            sectionLabel: section.sectionLabel,
+            entryNumber: getSectionSavedCount(section),
+            nextStep: next
+              ? `Filled ${sessionFields.length} field(s). ${missingMsg}\nNext: call fill with selector "${next.alias}".`
+              : `${missingMsg} Call fill for the next required field.`
+          }
+        }
+      }
+      return toolResult
+    }
+
+    const sectionDescriptor =
+      pageContext.addEntrySections?.find((item) => item.sectionLabel === section.sectionLabel) ??
+      section
+    const duplicate = findDuplicateSavedEntry(
+      sessionFields,
+      pageContext,
+      section.sectionLabel,
+      sectionDescriptor.savedEntries ?? []
+    )
+    if (duplicate) {
+      const duplicateMsg = buildDuplicateEntryMessage(section.sectionLabel, duplicate)
+      return {
+        ...toolResult,
+        result: {
+          ...(typeof toolResult.result === "object" && toolResult.result
+            ? (toolResult.result as Record<string, unknown>)
+            : {}),
+          duplicateEntry: duplicateMsg,
+          addEntry: {
+            submitted: false,
+            openedNext: true,
+            sectionLabel: section.sectionLabel,
+            entryNumber: getSectionSavedCount(sectionDescriptor),
+            nextStep: duplicateMsg
+          }
+        }
+      }
+    }
+
+    const signature = buildFillFieldsSignature(sessionFields)
     const isDuplicate =
       signature.length > 2 &&
       signature === this.lastFillFieldsSignature &&
       this.lastFillFieldsSignature !== null
 
-    let toolResult: ToolResult
     if (isDuplicate) {
-      devLog("Agent skipped duplicate fill_fields", { signature })
-      toolResult = {
+      return {
         ok: true,
         result: {
           filled: 0,
           skipped: true,
-          reason: "Same values were already filled — advancing to save and open the next entry."
+          reason: "Same entry was already saved — open the next item or call done."
         }
-      }
-    } else {
-      this.lastFillFieldsSignature = signature
-      if (remaining.length > 0) {
-        toolResult = await executeTool(
-          ctx.tabId,
-          toolName,
-          { ...args, fields: remaining },
-          toolContext
-        )
-      } else if (fields.length > 0) {
-        toolResult = {
-          ok: true,
-          result: {
-            filled: fields.length,
-            streamed: streamFilled.size > 0,
-            results: fields.map((field) => ({ selector: field.selector, ok: true }))
-          }
-        }
-      } else {
-        toolResult = await executeTool(ctx.tabId, toolName, args, toolContext)
       }
     }
 
-    const pageContext = await ctx.getPageContext()
-    const filledCount = extractFilledCountFromToolResult(toolResult)
-    let advance = null as Awaited<ReturnType<AgentController["advanceAddEntryAfterFill"]>> | null
-
-    if (toolResult.ok && filledCount > 0) {
-      const section = findAddEntrySectionForFilledFields(fields, pageContext)
-      if (section) {
-        const sectionFields = getSectionFillableFields(pageContext, section.sectionLabel)
-        const valueBySelector = buildPostFillValueMap(sectionFields, fields)
-        const missing = getMissingRequiredFields(
-          sectionFields,
-          new Set(fields.map((field) => field.selector)),
-          valueBySelector
-        )
-        if (missing.length) {
-          const missingMsg = buildMissingRequiredMessage(missing)
-          toolResult = {
-            ...toolResult,
-            result: {
-              ...(typeof toolResult.result === "object" && toolResult.result
-                ? (toolResult.result as Record<string, unknown>)
-                : {}),
-              missingRequired: missingMsg,
-              addEntry: {
-                submitted: false,
-                openedNext: true,
-                sectionLabel: section.sectionLabel,
-                entryNumber: getSectionSavedCount(section),
-                nextStep: missingMsg
-              }
-            }
-          }
-        } else {
-          const sectionDescriptor =
-            pageContext.addEntrySections?.find(
-              (item) => item.sectionLabel === section.sectionLabel
-            ) ?? section
-          const duplicate = findDuplicateSavedEntry(
-            fields,
-            pageContext,
-            section.sectionLabel,
-            sectionDescriptor.savedEntries ?? []
-          )
-          if (duplicate) {
-            const duplicateMsg = buildDuplicateEntryMessage(section.sectionLabel, duplicate)
-            toolResult = {
-              ...toolResult,
-              result: {
-                ...(typeof toolResult.result === "object" && toolResult.result
-                  ? (toolResult.result as Record<string, unknown>)
-                  : {}),
-                duplicateEntry: duplicateMsg,
-                addEntry: {
-                  submitted: false,
-                  openedNext: true,
-                  sectionLabel: section.sectionLabel,
-                  entryNumber: getSectionSavedCount(sectionDescriptor),
-                  nextStep: duplicateMsg
-                }
-              }
-            }
-          } else {
-            advance = await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
-          }
-        }
-      } else {
-        advance = await this.advanceAddEntryAfterFill(ctx, fields, pageContext, toolContext)
-      }
-    }
+    this.lastFillFieldsSignature = signature
+    const advance = await this.advanceAddEntryAfterFill(
+      ctx,
+      sessionFields,
+      pageContext,
+      toolContext
+    )
+    this.addEntryPartialFills.clear()
 
     if (advance) {
       toolResult = {
@@ -1177,6 +1499,108 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
     }
 
     return toolResult
+  }
+
+  private buildPartialFilledAliases(pageContext: PageContext): string[] {
+    if (!this.fieldAliasMap?.size) {
+      return Array.from(this.addEntryPartialFills.keys())
+    }
+    return Array.from(this.addEntryPartialFills.keys()).map(
+      (selector) => selectorToFillAlias(selector, this.fieldAliasMap!) ?? selector
+    )
+  }
+
+  private getNextFillAliasForOpenSection(pageContext: PageContext): string | null {
+    if (!this.openAddEntrySectionLabel) return null
+    const sectionFields = getSectionFillableFields(
+      pageContext,
+      this.openAddEntrySectionLabel
+    )
+    return (
+      getNextRequiredFillTarget(
+        sectionFields,
+        this.addEntryPartialFills,
+        this.fieldAliasMap ?? undefined
+      )?.alias ?? null
+    )
+  }
+
+  private async buildFillProgressResult(
+    ctx: AgentContext,
+    field: { selector: string; value: string },
+    sourceSelector: string,
+    opts: { filled: number; skipped?: boolean; repeatFill?: boolean }
+  ): Promise<ToolResult> {
+    const sessionFields = Array.from(this.addEntryPartialFills.entries()).map(
+      ([selector, value]) => ({ selector, value })
+    )
+    const partialCount = sessionFields.length
+
+    let toolResult: ToolResult = {
+      ok: true,
+      result: {
+        filled: opts.filled,
+        skipped: opts.skipped,
+        selector: field.selector,
+        value: field.value,
+        partialCount
+      }
+    }
+
+    const pageContext = await ctx.getPageContext()
+    const section =
+      (this.openAddEntrySectionLabel
+        ? pageContext.addEntrySections?.find(
+            (item) => item.sectionLabel === this.openAddEntrySectionLabel
+          )
+        : null) ?? findAddEntrySectionForFilledFields(sessionFields, pageContext)
+
+    if (!section) return toolResult
+
+    const sectionFields = getSectionFillableFields(pageContext, section.sectionLabel)
+    const missing = getSessionMissingRequiredFields(
+      sectionFields,
+      this.addEntryPartialFills,
+      this.fieldAliasMap ?? undefined
+    )
+    const next = getNextRequiredFillTarget(
+      sectionFields,
+      this.addEntryPartialFills,
+      this.fieldAliasMap ?? undefined
+    )
+
+    const filledAlias =
+      (this.fieldAliasMap
+        ? selectorToFillAlias(field.selector, this.fieldAliasMap)
+        : undefined) ?? sourceSelector
+
+    const nextStep = opts.repeatFill
+      ? buildRepeatFillMessage(filledAlias, next)
+      : buildFillContinuationMessage(
+          partialCount,
+          missing,
+          next,
+          this.fieldAliasMap ?? undefined
+        )
+
+    return {
+      ...toolResult,
+      result: {
+        ...(typeof toolResult.result === "object" && toolResult.result
+          ? (toolResult.result as Record<string, unknown>)
+          : {}),
+        missingRequired: missing.length ? buildMissingRequiredMessage(missing) : undefined,
+        nextField: next?.alias,
+        filledAliases: this.buildPartialFilledAliases(pageContext),
+        addEntry: {
+          submitted: false,
+          openedNext: true,
+          sectionLabel: section.sectionLabel,
+          entryNumber: getSectionSavedCount(section),
+          nextStep
+        }
+      }
+    }
   }
 
   private async closeOtherAddEntrySections(
@@ -1279,7 +1703,7 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         sectionLabel: section.sectionLabel,
         entryNumber: savedCount,
         nextStep: formReady
-          ? `No new entry appeared in the saved list — fix required fields and fill_fields again. Form reopened.`
+          ? `No new entry appeared in the saved list — fix required fields and call fill for each missing field. Form reopened.`
           : `No new entry appeared — click ${section.addButtonLabel} and retry with corrected values.`,
         entryAdded: false,
         savedCount,
@@ -1367,34 +1791,24 @@ function extractFilledCountFromToolResult(toolResult: ToolResult): number {
   return typeof filled === "number" ? filled : 0
 }
 
-function compactAssistantTurn(
-  text: string,
-  toolCalls: Array<{ name: string; args: Record<string, unknown> }>,
-  addEntryMode: boolean,
-  textActionMode: boolean
-): string {
-  if (!addEntryMode || !textActionMode) return text
-
-  const fillCall = toolCalls.find((call) => call.name === "fill_fields")
-  if (fillCall) {
-    const count = parseFillFieldsArg(fillCall.args.fields).length
-    return `{"action":"fill_fields","fields":${count}}`
-  }
-
-  const clickCall = toolCalls.find((call) => call.name === "click")
-  if (clickCall) {
-    if (clickCall.args.section) {
-      return `{"action":"click","section":"${String(clickCall.args.section)}"}`
+function normalizeAgentToolCalls(
+  toolCalls: Array<{ name: string; args: Record<string, unknown> }>
+): Array<{ name: string; args: Record<string, unknown> }> {
+  const normalized: Array<{ name: string; args: Record<string, unknown> }> = []
+  for (const call of toolCalls) {
+    if (call.name === "fill_fields") {
+      const fields = parseFillFieldsArg(call.args.fields)
+      if (fields.length === 1) {
+        normalized.push({
+          name: "fill",
+          args: { selector: fields[0]!.selector, value: fields[0]!.value }
+        })
+        continue
+      }
     }
-    return `{"action":"click","selector":"${String(clickCall.args.selector ?? "")}"}`
+    normalized.push(call)
   }
-
-  const doneCall = toolCalls.find((call) => call.name === "done")
-  if (doneCall) {
-    return `{"action":"done","message":"${String(doneCall.args.message ?? "").slice(0, 80)}"}`
-  }
-
-  return text.length > 160 ? `${text.slice(0, 160)}…` : text
+  return normalized
 }
 
 function buildSystemPrompt(mode: ChatMode, pageContext: PageContext): string {

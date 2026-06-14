@@ -8,7 +8,6 @@ import {
 } from "~/lib/text-actions"
 import { chat, checkOllamaHealth, listModels, OllamaToolsNotSupportedError } from "~/lib/ollama/client"
 import { AGENT_TOOLS } from "~/lib/ollama/tools"
-import { parseFillFieldsArg } from "~/lib/tool-args"
 import {
   DEEPSEEK_LITE_MODEL,
   deepseekToolsNotSupportedError
@@ -187,18 +186,15 @@ describe("Ollama deepseek-coder-v2:lite text-action integration", () => {
     expect(calls[0].name).toBe("click")
   })
 
-  it("returns a parseable fill_fields action for one work experience entry", async () => {
+  it("returns a parseable fill action for one field", async () => {
     if (!ctx.available || !ctx.modelInstalled) return
 
     const messages = buildTextActionMessages(
       [
         "The work experience sub-form is already open.",
-        "Fill ONE entry with fill_fields:",
+        "Fill ONE field with fill:",
         "- Title: Teaching Assistant (Advanced Programming)",
-        "- Employer: Dr. Azadeh Mansouri",
-        "- City: Tehran",
-        "- Country: SE",
-        "Use selectors from the field list. Return only one JSON action."
+        "Use selectors from the field list. Return only one JSON action with a single selector and value."
       ].join("\n")
     )
 
@@ -212,12 +208,9 @@ describe("Ollama deepseek-coder-v2:lite text-action integration", () => {
 
     const action = parseTextAction(result.content)
     expect(action, `unparsed response: ${result.content.slice(0, 500)}`).not.toBeNull()
-    expect(action?.name).toBe("fill_fields")
-
-    const fields = parseFillFieldsArg(action?.args.fields)
-    expect(fields.length).toBeGreaterThanOrEqual(2)
-    expect(fields.some((f) => /teaching assistant/i.test(f.value))).toBe(true)
-    expect(fields.some((f) => /mansouri/i.test(f.value))).toBe(true)
+    expect(action?.name).toBe("fill")
+    expect(String(action?.args.selector).length).toBeGreaterThan(0)
+    expect(String(action?.args.value)).toMatch(/teaching assistant/i)
   })
 
   it("matches the known tools-not-supported error message for this model", () => {

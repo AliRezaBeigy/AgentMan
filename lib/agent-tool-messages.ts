@@ -71,11 +71,33 @@ export function compactToolResultForAgent(
   }
 
   if (toolName === "fill") {
+    const addEntry = result?.addEntry as Record<string, unknown> | undefined
     return {
       ok: toolResult.ok,
       error: toolResult.error,
       selector: result?.selector,
-      value: result?.value
+      value: result?.value,
+      filled: result?.filled,
+      skipped: result?.skipped,
+      partialCount: result?.partialCount,
+      duplicateEntry: result?.duplicateEntry,
+      missingRequired: result?.missingRequired,
+      nextField: result?.nextField,
+      filledAliases: result?.filledAliases,
+      addEntry: addEntry
+        ? {
+            submitted: addEntry.submitted,
+            openedNext: addEntry.openedNext,
+            sectionLabel: addEntry.sectionLabel,
+            entryNumber: addEntry.entryNumber,
+            nextStep: addEntry.nextStep,
+            entryAdded: addEntry.entryAdded,
+            savedCount: addEntry.savedCount,
+            sessionAdded: addEntry.sessionAdded,
+            lastSavedSummary: addEntry.lastSavedSummary,
+            error: addEntry.error
+          }
+        : undefined
     }
   }
 
@@ -107,27 +129,45 @@ export function formatCompactAgentToolResultMessage(
   toolResult: AgentToolResult
 ): string {
   const compact = compactToolResultForAgent(toolName, toolResult)
-  if (toolName === "fill_fields") {
+  if (toolName === "fill" || toolName === "fill_fields") {
     const addEntry = compact.addEntry as Record<string, unknown> | undefined
     if (addEntry) {
       if (compact.duplicateEntry) {
         return String(compact.duplicateEntry)
       }
+      if (addEntry.submitted === false && compact.missingRequired) {
+        return String(compact.missingRequired)
+      }
       if (addEntry.entryAdded === false) {
         return `Save failed — no new entry in list (${addEntry.savedCount ?? 0} on page). ${addEntry.error ?? addEntry.nextStep ?? ""}`.trim()
       }
-      const summary =
-        typeof addEntry.lastSavedSummary === "string"
-          ? ` "${addEntry.lastSavedSummary}"`
-          : ""
-      return `Saved ${addEntry.sectionLabel} entry #${addEntry.entryNumber} (${addEntry.savedCount ?? addEntry.entryNumber} on page).${summary} ${addEntry.nextStep ?? ""}`.trim()
+      if (addEntry.submitted) {
+        const summary =
+          typeof addEntry.lastSavedSummary === "string"
+            ? ` "${addEntry.lastSavedSummary}"`
+            : ""
+        return `Saved ${addEntry.sectionLabel} entry #${addEntry.entryNumber} (${addEntry.savedCount ?? addEntry.entryNumber} on page).${summary} ${addEntry.nextStep ?? ""}`.trim()
+      }
+      if (typeof addEntry.nextStep === "string" && addEntry.nextStep) {
+        return addEntry.nextStep
+      }
     }
-    return `Filled ${compact.filled ?? 0} field(s).`
+    if (compact.skipped) {
+      const addEntry = compact.addEntry as Record<string, unknown> | undefined
+      if (typeof addEntry?.nextStep === "string" && addEntry.nextStep) {
+        return addEntry.nextStep
+      }
+      if (compact.nextField) {
+        return `Field already filled. Next: call fill with selector "${compact.nextField}".`
+      }
+      return "Field already filled."
+    }
+    return `Filled ${compact.filled ?? 1} field(s).`
   }
   if (toolName === "click") {
     const wait = compact.addEntryWait as Record<string, unknown> | undefined
     if (wait?.alreadyOpen && wait?.section) {
-      return `${wait.section} form already open — use fill_fields, do not click Add again.`
+      return `${wait.section} form already open — use fill (one field at a time), do not click Add again.`
     }
     if (wait?.section) return `Opened ${wait.section}.`
     return compact.ok ? "Click ok." : `Click failed: ${compact.error ?? "unknown"}`

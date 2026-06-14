@@ -14,7 +14,7 @@ export interface ParsedTextAction {
 export function buildCompactTextActionSystemPrompt(): string {
   return `Return exactly ONE JSON object per turn (never a JSON array). Use a \`\`\`json fence.
 Example: {"action":"click","section":"<section label from form>"}
-fill_fields must use {"selector":"...","value":"data from attachment"} — never echo field definitions without values.
+fill must use {"selector":"...","value":"data from attachment"} — one field per turn, never batch multiple fields.
 Wait for the action result before the next turn.`
 }
 
@@ -25,7 +25,7 @@ Return EXACTLY ONE JSON object per turn inside a \`\`\`json fence. No text befor
 
 Actions:
 - {"action":"click","section":"<section label>"}
-- {"action":"fill_fields","fields":[{"selector":"<field selector from list>","value":"..."}]}
+- {"action":"fill","selector":"<field alias or selector>","value":"<value from attachment>"}
 - {"action":"get_page_content"}
 - {"action":"done","message":"summary when finished"}
 
@@ -33,9 +33,10 @@ Rules:
 - To OPEN a section, use {"action":"click","section":"<exact section label>"} — do NOT use onclick selectors.
 - Copy field selectors exactly from the field list (do not guess ids).
 - Finish ALL items in one section before opening the next.
-- One fill_fields per entry; extension auto-saves and reopens the form.
+- One fill per field — call fill again for each remaining required field; extension auto-saves when all required fields are filled.
 - Call done only when every section has all items from the attachment saved.
-- NEVER return a JSON array of actions — one object per turn only.`
+- NEVER return a JSON array of actions — one object per turn only.
+- NEVER batch multiple fields in one action — use fill once per field.`
 }
 
 export function buildTextActionJsonSchema(): Record<string, unknown> {
@@ -44,22 +45,12 @@ export function buildTextActionJsonSchema(): Record<string, unknown> {
     properties: {
       action: {
         type: "string",
-        enum: ["click", "fill_fields", "done", "get_page_content"]
+        enum: ["click", "fill", "done", "get_page_content"]
       },
       section: { type: "string" },
       selector: { type: "string" },
-      message: { type: "string" },
-      fields: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            selector: { type: "string" },
-            value: { type: "string" }
-          },
-          required: ["selector", "value"]
-        }
-      }
+      value: { type: "string" },
+      message: { type: "string" }
     },
     required: ["action"],
     additionalProperties: true
@@ -113,23 +104,49 @@ export function looksLikeActionArray(content: string): boolean {
   return countTextActionsInContent(content) > 1
 }
 
-export function fillFieldsActionHasValues(args: Record<string, unknown>): boolean {
+export function fillActionHasValue(args: Record<string, unknown>): boolean {
+  const selector = String(args.selector ?? "").trim()
+  const value = String(args.value ?? "")
+  if (selector && value.trim()) return true
   const fields = parseFillFieldsArg(args.fields)
   return fields.some((field) => field.value.trim().length > 0)
 }
+
+/** @deprecated Use fillActionHasValue */
+export const fillFieldsActionHasValues = fillActionHasValue
 
 export function buildMultiActionRejectionMessage(): string {
   return `Do NOT return a JSON array of steps. Return ONE JSON object for the immediate next action only, then wait for the result.
 Example next step: {"action":"click","section":"<section label>"}`
 }
 
-export function buildEmptyFillFieldsRejectionMessage(): string {
-  return `fill_fields must include a "value" for each field from the user's attachment — not field labels/types/options.
-Example: {"action":"fill_fields","fields":[{"selector":"<field selector>","value":"<value from attachment>"}]}`
+export function buildEmptyFillRejectionMessage(): string {
+  return `fill must include "selector" and "value" from the user's attachment — not field labels/types/options.
+Example: {"action":"fill","selector":"<field alias>","value":"<value from attachment>"}`
+}
+
+/** @deprecated Use buildEmptyFillRejectionMessage */
+export const buildEmptyFillFieldsRejectionMessage = buildEmptyFillRejectionMessage
+
+export function buildBatchFillRejectionMessage(): string {
+  return `Do NOT batch multiple fields in one action. Call fill once per field:
+{"action":"fill","selector":"<first field alias>","value":"<value from attachment>"}
+Then wait for the result and call fill again for the next field.`
 }
 
 export function shouldSuppressActionArrayStream(content: string): boolean {
   return looksLikeRootActionArrayStarting(content)
+}
+
+function fillActionFromFields(
+  fields: Array<{ selector: string; value: string }>
+): ParsedTextAction | null {
+  if (!fields.length || fields.every((field) => !field.value.trim())) return null
+  if (fields.length > 1) return null
+  return {
+    name: "fill",
+    args: { selector: fields[0]!.selector, value: fields[0]!.value }
+  }
 }
 
 function actionFromRecord(obj: Record<string, unknown>): ParsedTextAction | null {
@@ -143,11 +160,15 @@ function actionFromRecord(obj: Record<string, unknown>): ParsedTextAction | null
     }
   }
 
+  if (name === "fill") {
+    const selector = String(obj.selector ?? "").trim()
+    const value = String(obj.value ?? "")
+    if (!selector || !value.trim()) return null
+    return { name: "fill", args: { selector, value } }
+  }
+
   if (name === "fill_fields") {
-    const fields = parseFillFieldsArg(obj.fields)
-    if (!fields.length) return null
-    if (fields.every((field) => !field.value.trim())) return null
-    return { name, args: { fields } }
+    return fillActionFromFields(parseFillFieldsArg(obj.fields))
   }
 
   if (name === "click" && obj.section) {
@@ -194,30 +215,23 @@ function parseTextActionLoose(content: string): ParsedTextAction | null {
   }
 
   if (name === "fill") {
-    const selector = extractClickSelector(content)
-    if (!selector) return null
-    const args: Record<string, unknown> = { selector }
-    if (name === "fill") {
-      const valueMatch = content.match(/"value"\s*:\s*"((?:[^"\\]|\\.)*)"/)
-      if (valueMatch) args.value = unescapeJsonString(valueMatch[1])
+    const selector = extractJsonStringValue(content, "selector")
+    const valueMatch = content.match(/"value"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+    if (!selector || !valueMatch) return null
+    return {
+      name: "fill",
+      args: { selector, value: unescapeJsonString(valueMatch[1]) }
     }
-    return { name, args }
   }
 
   if (name === "fill_fields") {
     const arrayMatch = content.match(/"fields"\s*:\s*(\[[\s\S]*\])/)
     if (arrayMatch) {
-      const fields = parseFillFieldsArg(arrayMatch[1])
-      if (fields.length && fields.some((field) => field.value.trim())) {
-        return { name, args: { fields } }
-      }
+      return fillActionFromFields(parseFillFieldsArg(arrayMatch[1]))
     }
     const stringMatch = content.match(/"fields"\s*:\s*"((?:[^"\\]|\\.)*)"/)
     if (stringMatch) {
-      const fields = parseFillFieldsArg(unescapeJsonString(stringMatch[1]))
-      if (fields.length && fields.some((field) => field.value.trim())) {
-        return { name, args: { fields } }
-      }
+      return fillActionFromFields(parseFillFieldsArg(unescapeJsonString(stringMatch[1])))
     }
   }
 
@@ -292,7 +306,16 @@ function unescapeJsonString(fragment: string): string {
   }
 }
 
+export function looksLikeBatchFillFields(content: string): boolean {
+  const parsed = extractJsonValue(content.trim())
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false
+  const action = String((parsed as Record<string, unknown>).action ?? "").trim()
+  if (action !== "fill_fields") return false
+  return parseFillFieldsArg((parsed as Record<string, unknown>).fields).length > 1
+}
+
 export function looksLikeFailedTextAction(content: string): boolean {
+  if (looksLikeBatchFillFields(content)) return true
   return /"action"\s*:/.test(content) && !parseTextAction(content)
 }
 
@@ -308,7 +331,14 @@ export function textActionNeedsFollowUp(content: string): boolean {
 export function buildTextActionRetryMessage(): string {
   return `Return ONE JSON object (not an array) inside a \`\`\`json fence.
 To open a section: {"action":"click","section":"<section label>"}
-To fill: {"action":"fill_fields","fields":[{"selector":"<field selector>","value":"<value from attachment>"}]}`
+To fill ONE field: {"action":"fill","selector":"<field alias>","value":"<value from attachment>"}`
+}
+
+export function buildTextActionRetryMessageForContent(content: string): string {
+  if (looksLikeBatchFillFields(content)) {
+    return buildBatchFillRejectionMessage()
+  }
+  return buildTextActionRetryMessage()
 }
 
 /** Convert model text into executable tool calls (non-tool models). */

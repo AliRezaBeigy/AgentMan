@@ -1,8 +1,11 @@
 import { Pencil, RotateCcw } from "lucide-react"
 import { useState } from "react"
 
+import { AgentStepsPanel } from "~/components/AgentStepsPanel"
+import { AttachmentBubbles } from "~/components/AttachmentBubbles"
 import { Button } from "~/components/ui/button"
 import { Textarea } from "~/components/ui/textarea"
+import { stripLegacyAttachmentNote } from "~/lib/chat-display"
 import { cn } from "~/lib/utils"
 import type { ChatMessage as ChatMessageType } from "~/lib/types"
 
@@ -18,8 +21,9 @@ export function ChatMessage({
   onRetry?: (messageId: string) => void
 }) {
   const isUser = message.role === "user"
+  const displayContent = stripLegacyAttachmentNote(message.content)
   const [editing, setEditing] = useState(false)
-  const [editText, setEditText] = useState(message.content)
+  const [editText, setEditText] = useState(displayContent)
 
   function handleSaveEdit() {
     const trimmed = editText.trim()
@@ -29,13 +33,17 @@ export function ChatMessage({
   }
 
   return (
-    <div className={cn("group flex w-full flex-col", isUser ? "items-end" : "items-start")}>
+    <div
+      className={cn(
+        "group flex w-full flex-col",
+        isUser ? "items-end" : "items-stretch"
+      )}>
       <div
         className={cn(
-          "relative max-w-[90%] rounded-2xl px-3 py-2 text-sm leading-relaxed",
+          "relative rounded-xl text-sm leading-relaxed",
           isUser
-            ? "bg-primary text-primary-foreground"
-            : "bg-muted text-foreground"
+            ? "max-w-[85%] bg-primary px-2.5 py-1.5 text-primary-foreground"
+            : "w-full bg-muted px-2 py-1.5 text-foreground"
         )}>
         {editing ? (
           <div className="space-y-2">
@@ -54,7 +62,7 @@ export function ChatMessage({
                 size="sm"
                 className={isUser ? "text-primary-foreground hover:bg-primary-foreground/10" : ""}
                 onClick={() => {
-                  setEditText(message.content)
+                  setEditText(displayContent)
                   setEditing(false)
                 }}>
                 Cancel
@@ -70,15 +78,21 @@ export function ChatMessage({
           </div>
         ) : (
           <>
-            <p className="whitespace-pre-wrap">
-              {message.content || (message.isStreaming ? "…" : "")}
-            </p>
+            {!isUser && message.agentSteps && message.agentSteps.length > 0 && (
+              <AgentStepsPanel steps={message.agentSteps} isStreaming={message.isStreaming} />
+            )}
+            {displayContent && (
+              <p className="whitespace-pre-wrap">{displayContent}</p>
+            )}
+            {isUser && message.attachments && message.attachments.length > 0 && (
+              <AttachmentBubbles attachments={message.attachments} variant="user" />
+            )}
             {message.images?.map((src) => (
               <img
                 key={src.slice(0, 32)}
                 src={src}
                 alt="attachment"
-                className="mt-2 max-h-40 rounded-md"
+                className="mt-1.5 max-h-40 rounded-md"
               />
             ))}
           </>
@@ -88,7 +102,7 @@ export function ChatMessage({
       {!editing && !message.isStreaming && !disabled && (
         <div
           className={cn(
-            "mt-1 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100",
+            "mt-0.5 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100",
             isUser ? "justify-end" : "justify-start"
           )}>
           {isUser && onEdit && (
@@ -97,7 +111,7 @@ export function ChatMessage({
               size="sm"
               className="h-7 gap-1 px-2 text-xs text-muted-foreground"
               onClick={() => {
-                setEditText(message.content)
+                setEditText(displayContent)
                 setEditing(true)
               }}>
               <Pencil className="h-3 w-3" />

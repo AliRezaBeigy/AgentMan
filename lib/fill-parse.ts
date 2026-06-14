@@ -96,6 +96,7 @@ ${JSON.stringify(hints, null, 2)}
 Rules:
 - Include every property listed above — no more, no fewer.
 - Use the exact property names shown (e.g. "Lead source" not "source"). Never invent alternate key names.
+- Values are applied on the page as each property completes — you do not need to wait until the entire JSON is ready.
 ${rowNote}- For fields with an "options" list, pick one option exactly as written.
 - Checkboxes: "true" or "false".
 - Generate realistic random data when asked.

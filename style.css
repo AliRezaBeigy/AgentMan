@@ -79,3 +79,37 @@
 .tiptap .mention {
   @apply rounded-md border border-border/50 bg-[hsl(var(--mention-bg))] px-1 text-primary;
 }
+
+@layer utilities {
+  .agentman-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
+    overscroll-behavior: contain;
+  }
+
+  .agentman-scroll::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+
+  .agentman-scroll::-webkit-scrollbar-track {
+    margin-block: 6px;
+    background: transparent;
+  }
+
+  .agentman-scroll::-webkit-scrollbar-thumb {
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: hsl(var(--muted-foreground) / 0.28);
+    background-clip: padding-box;
+  }
+
+  .agentman-scroll::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.45);
+    background-clip: padding-box;
+  }
+
+  .agentman-scroll::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}

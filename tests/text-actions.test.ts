@@ -4,6 +4,7 @@ import {
   appendTextActionInstructions,
   countTextActionsInContent,
   looksLikeActionArray,
+  looksLikeBatchFillFields,
   looksLikeRootActionArrayStarting,
   looksLikeFailedTextAction,
   parseTextAction,
@@ -16,7 +17,9 @@ import {
   deepseekClickBySection,
   deepseekClickWorkExperience,
   deepseekDone,
-  deepseekFillFieldsWorkExperience
+  deepseekFillFieldsWorkExperience,
+  deepseekFillFieldsWithIds,
+  deepseekFillSingleField
 } from "./fixtures/deepseek-text-actions"
 
 describe("text-actions", () => {
@@ -56,12 +59,26 @@ describe("text-actions", () => {
     expect(looksLikeFailedTextAction('{"action":"click","selector":"#x"}')).toBe(false)
   })
 
-  it("parses fill_fields from fenced JSON", () => {
+  it("converts single-field fill_fields to fill", () => {
     const action = parseTextAction(
       '```json\n{"action":"fill_fields","fields":[{"selector":"#title","value":"Engineer"}]}\n```'
     )
-    expect(action?.name).toBe("fill_fields")
-    expect(Array.isArray(action?.args.fields)).toBe(true)
+    expect(action?.name).toBe("fill")
+    expect(action?.args.selector).toBe("#title")
+    expect(action?.args.value).toBe("Engineer")
+  })
+
+  it("rejects batch fill_fields with multiple fields", () => {
+    expect(parseTextAction(deepseekFillFieldsWorkExperience)).toBeNull()
+    expect(looksLikeBatchFillFields(deepseekFillFieldsWorkExperience)).toBe(true)
+    expect(looksLikeFailedTextAction(deepseekFillFieldsWorkExperience)).toBe(true)
+  })
+
+  it("parses fill action directly", () => {
+    const action = parseTextAction(deepseekFillSingleField)
+    expect(action?.name).toBe("fill")
+    expect(action?.args.selector).toBe("#job-title")
+    expect(action?.args.value).toContain("Teaching Assistant")
   })
 
   it("parses done action", () => {
@@ -70,15 +87,10 @@ describe("text-actions", () => {
     expect(action?.args.message).toBe("All entries added.")
   })
 
-  it("parses deepseek fill_fields with agentman field keys", () => {
-    const action = parseTextAction(deepseekFillFieldsWorkExperience)
-    expect(action?.name).toBe("fill_fields")
-    expect(Array.isArray(action?.args.fields)).toBe(true)
-  })
-
   it("converts deepseek responses to tool calls via textActionToToolCalls", () => {
     expect(textActionToToolCalls(deepseekClickWorkExperience)[0].name).toBe("click")
-    expect(textActionToToolCalls(deepseekFillFieldsWorkExperience)[0].name).toBe("fill_fields")
+    expect(textActionToToolCalls(deepseekFillSingleField)[0].name).toBe("fill")
+    expect(textActionToToolCalls(deepseekFillFieldsWorkExperience)).toHaveLength(0)
     expect(textActionToToolCalls(deepseekDone)[0].name).toBe("done")
     expect(textActionToToolCalls(deepseekBrokenAction)).toHaveLength(0)
   })
@@ -95,7 +107,7 @@ describe("text-actions", () => {
     const content = `\`\`\`json
 [
   {"action":"click","section":"Work experience"},
-  {"action":"fill_fields","fields":[{"selector":"#a","value":"b"}]}
+  {"action":"fill","selector":"#a","value":"b"}
 ]
 \`\`\``
     expect(parseTextAction(content)).toBeNull()
@@ -104,10 +116,15 @@ describe("text-actions", () => {
     expect(looksLikeRootActionArrayStarting(content)).toBe(true)
   })
 
-  it("allows fill_fields inner array but not root action array", () => {
+  it("allows single-field fill_fields but not root action array", () => {
     const content = '{"action":"fill_fields","fields":[{"selector":"#a","value":"b"}]}'
     expect(looksLikeRootActionArrayStarting(content)).toBe(false)
-    expect(parseTextAction(content)?.name).toBe("fill_fields")
+    expect(parseTextAction(content)?.name).toBe("fill")
+  })
+
+  it("rejects multi-field fill_fields", () => {
+    expect(parseTextAction(deepseekFillFieldsWithIds)).toBeNull()
+    expect(looksLikeBatchFillFields(deepseekFillFieldsWithIds)).toBe(true)
   })
 
   it("rejects fill_fields that echo field metadata without values", () => {

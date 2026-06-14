@@ -1,4 +1,5 @@
 import type {
+  AgentActivityStep,
   AgentState,
   ChatMode,
   PageContext,
@@ -12,6 +13,7 @@ export const MessageType = {
   PAGE_CONTEXT: "AGENTMAN_PAGE_CONTEXT",
   CHAT_SEND: "AGENTMAN_CHAT_SEND",
   CHAT_STREAM: "AGENTMAN_CHAT_STREAM",
+  CHAT_AGENT_STEP: "AGENTMAN_CHAT_AGENT_STEP",
   CHAT_DONE: "AGENTMAN_CHAT_DONE",
   CHAT_ERROR: "AGENTMAN_CHAT_ERROR",
   AGENT_STATE: "AGENTMAN_AGENT_STATE",
@@ -57,6 +59,11 @@ export interface ChatStreamPayload {
   delta: string
 }
 
+export interface ChatAgentStepPayload {
+  sessionId: string
+  step: AgentActivityStep
+}
+
 export interface ChatDonePayload {
   sessionId: string
   content: string
@@ -92,6 +99,7 @@ export type RuntimeMessage =
   | { type: typeof MessageType.PAGE_CONTEXT; payload: PageContext }
   | { type: typeof MessageType.CHAT_SEND; payload: ChatSendPayload }
   | { type: typeof MessageType.CHAT_STREAM; payload: ChatStreamPayload }
+  | { type: typeof MessageType.CHAT_AGENT_STEP; payload: ChatAgentStepPayload }
   | { type: typeof MessageType.CHAT_DONE; payload: ChatDonePayload }
   | { type: typeof MessageType.CHAT_ERROR; payload: ChatErrorPayload }
   | { type: typeof MessageType.AGENT_STATE; payload: AgentState }

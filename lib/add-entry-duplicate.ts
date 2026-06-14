@@ -69,5 +69,5 @@ export function buildDuplicateEntryMessage(
 ): string {
   const preview =
     duplicate.summary.length > 90 ? `${duplicate.summary.slice(0, 90)}…` : duplicate.summary
-  return `Duplicate ${sectionLabel} entry — "${preview}" is already saved. Call done if all attachment items are saved, or fill_fields with the NEXT unsaved item only.`
+  return `Duplicate ${sectionLabel} entry — "${preview}" is already saved. Call done if all attachment items are saved, or fill the NEXT unsaved item one field at a time.`
 }

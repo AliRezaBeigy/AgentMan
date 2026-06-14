@@ -82,5 +82,5 @@ export function buildAddEntryAdvanceMessage(
   section: AddEntrySectionDescriptor,
   entryNumber: number
 ): string {
-  return `Saved ${section.sectionLabel} entry #${entryNumber}. Form reopened — if the attachment has more ${section.sectionLabel} items, call fill_fields with the NEXT item now (do not open another section yet). When all ${section.sectionLabel} items are saved, then open the next section.`
+  return `Saved ${section.sectionLabel} entry #${entryNumber}. Form reopened — if the attachment has more ${section.sectionLabel} items, fill the NEXT item one field at a time (do not open another section yet). When all ${section.sectionLabel} items are saved, then open the next section.`
 }

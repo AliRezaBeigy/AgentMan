@@ -139,7 +139,7 @@ export function estimateDelegatedAgentIterations(
     pageContext.fields
   )
   const fieldsPerEntry = sections.reduce((sum, s) => sum + Math.max(s.fieldLabels.length, 1), 0)
-  // ~4 LLM turns per entry (open, fill_fields, submit, cancel) × estimated entries per section
+  // ~4 LLM turns per entry (open, fill per field, auto-save) × estimated entries per section
   const estimatedEntriesPerSection = 8
   const estimated = sections.length * estimatedEntriesPerSection * 3 + fieldsPerEntry
   return Math.max(baseLimit, Math.min(estimated, 150))
@@ -205,7 +205,7 @@ export function buildPrematureDoneRejection(
 
   if (missing.length) {
     const sectionOrder = targeted.map((section) => section.sectionLabel).join(" → ")
-    return `Do not call done yet — no saved entries on page for: ${missing.join(", ")}. For each section: {"action":"click","section":"..."} then fill_fields once per attachment item. Complete sections in order (${sectionOrder}). Only one section form can be open at a time.`
+    return `Do not call done yet — no saved entries on page for: ${missing.join(", ")}. For each section: {"action":"click","section":"..."} then fill each required field one at a time per attachment item. Complete sections in order (${sectionOrder}). Only one section form can be open at a time.`
   }
 
   const pending = getSectionEntryRemaining(userMessage, addEntrySections, baselineCounts).filter(
@@ -215,7 +215,7 @@ export function buildPrematureDoneRejection(
     const detail = pending
       .map((item) => `${item.remaining} more ${item.sectionLabel} (${item.onPage - item.baseline}/${item.expected} saved)`)
       .join("; ")
-    return `Do not call done yet — attachment still has unsaved items: ${detail}. Call fill_fields for the next unsaved item only.`
+    return `Do not call done yet — attachment still has unsaved items: ${detail}. Call fill for the next required field of the next unsaved item only.`
   }
 
   return null
@@ -231,9 +231,9 @@ export function buildFalseCompletionNudge(
   const pending = formatRemainingEntriesHint(remaining)
   const detail = pending || "more items from the attachment"
   if (textActionMode) {
-    return `You said the task is complete but the attachment still needs ${detail}. Return fill_fields for the next unsaved item, or {"action":"done"} only when every expected item is saved.`
+    return `You said the task is complete but the attachment still needs ${detail}. Return fill for the next required field, or {"action":"done"} only when every expected item is saved.`
   }
-  return `You said the task is complete but the attachment still needs ${detail}. Call fill_fields for the next unsaved item, or call done only when every expected item is saved.`
+  return `You said the task is complete but the attachment still needs ${detail}. Call fill for the next required field, or call done only when every expected item is saved.`
 }
 
 export function buildAgentContinuationNudge(
@@ -272,7 +272,7 @@ export function buildAgentContinuationNudge(
     addEntrySections.length > 0
       ? addEntrySections.map((section) => section.sectionLabel).join(" and ")
       : "expected"
-  return `You replied with text only but did not call any tools.${progress}${pendingHint} Continue the user request now — use fill_fields for the next unsaved entry (one call per entry) or click to open a section. Do not stop with narration; call tools until every ${sectionNames} item from the attachment is added.`
+  return `You replied with text only but did not call any tools.${progress}${pendingHint} Continue the user request now — use fill (one field at a time) for the next unsaved entry or click to open a section. Do not stop with narration; call tools until every ${sectionNames} item from the attachment is added.`
 }
 
 function formatFieldLine(field: FormFieldDescriptor): string {
@@ -307,7 +307,7 @@ export function buildAgentFormContextNote(
     : getFillableFields(pageContext.fields)
 
   if (fillable.length) {
-    lines.push("Form fields (use fill or fill_fields with selector):")
+    lines.push("Form fields (use fill with selector alias):")
     for (const field of fillable.slice(0, 120)) {
       lines.push(formatFieldLine(field))
     }
@@ -374,14 +374,15 @@ export function buildCompactAddEntrySystemPrompt(
     : ""
 
   return `AgentMan. Page: ${pageContext.url}
-Use click / fill_fields / done tools — one tool call per turn (never a JSON array in content).
-Workflow: click section → fill_fields → auto-save → next entry.
+Use click / fill / done tools — one tool call per turn (never a JSON array in content).
+Workflow: click section → fill each required field one at a time → auto-save → next entry.
+When a section form is open, call fill with ONE selector+value per turn so values appear immediately.
 Sections (label|open|save):
 ${sectionLines}
-${expectedBlock}${savedBlock}Field aliases (alias;type;REQUIRED;options;attachment hints) — fill every REQUIRED line in one fill_fields call:
+${expectedBlock}${savedBlock}Field aliases (alias;type;REQUIRED;options;attachment hints):
 ${fieldAliases}
 REQUIRED fields must have real values (selects: never -1/Choose). Lines with "attachment:" map attachment data under different names.
-Example fill_fields: [{"selector":"<alias or selector>","value":"..."},{"selector":"<alias or selector>","value":"..."}]
+Example fill: {"selector":"work:title","value":"..."}
 When every expected attachment item is saved, call done — never re-add entries already listed under "Saved entries on page".`
 }
 
@@ -416,7 +417,9 @@ export function buildAddEntryTurnHint(
   sessionCounts: ReadonlyMap<string, number> = new Map(),
   textActionMode = false,
   userMessage?: string,
-  baselineCounts: ReadonlyMap<string, number> = new Map()
+  baselineCounts: ReadonlyMap<string, number> = new Map(),
+  partialFilledAliases: string[] = [],
+  nextFillAlias: string | null = null
 ): string {
   const progressParts = sections
     .map((section) => {
@@ -458,11 +461,23 @@ export function buildAddEntryTurnHint(
       return `${ADD_ENTRY_TURN_HINT_PREFIX}${progressSuffix} ${formatCompletionDoneHint(remaining, textActionMode)}`
     }
 
-    return `${ADD_ENTRY_TURN_HINT_PREFIX} ${openSectionLabel} form is open.${progressSuffix} ${
-      textActionMode
-        ? `Return fill_fields with the NEXT unsaved ${openSectionLabel} item from the attachment — do NOT click Add again or re-add entries already saved.`
-        : `Call fill_fields with the NEXT unsaved ${openSectionLabel} item — do NOT click Add again or re-add entries already saved.`
-    }`
+    const filledHint =
+      partialFilledAliases.length > 0
+        ? ` Already filled: ${partialFilledAliases.join(", ")}.`
+        : ""
+    const nextHint = nextFillAlias
+      ? textActionMode
+        ? ` Next: {"action":"fill","selector":"${nextFillAlias}","value":"..."} — do NOT repeat a filled field.`
+        : ` Next: call fill with selector "${nextFillAlias}" — do NOT repeat a filled field.`
+      : partialFilledAliases.length > 0
+        ? textActionMode
+          ? ` All required fields for this ${openSectionLabel} item are filled — wait for auto-save or call done. Do NOT re-fill: ${partialFilledAliases.join(", ")}.`
+          : ` All required fields for this ${openSectionLabel} item are filled — wait for auto-save or call done. Do NOT re-fill fields already listed above.`
+        : textActionMode
+          ? ` Return {"action":"fill","selector":"<alias>","value":"..."} for the NEXT required field of the unsaved ${openSectionLabel} item — one field per turn. Do NOT click Add again or re-add entries already saved.`
+          : ` Call fill (one field at a time) for the NEXT required field of the unsaved ${openSectionLabel} item. Do NOT click Add again or re-add entries already saved.`
+
+    return `${ADD_ENTRY_TURN_HINT_PREFIX} ${openSectionLabel} form is open.${progressSuffix}${filledHint}${nextHint}`
   }
 
   if (!lastToolName) {
@@ -472,12 +487,12 @@ export function buildAddEntryTurnHint(
   if (lastToolName === "click") {
     return `${ADD_ENTRY_TURN_HINT_PREFIX} Form open.${progressSuffix} ${
       textActionMode
-        ? "Return fill_fields using section field aliases (or #id) with values from the attachment. Do NOT click Add again."
-        : "Call fill_fields using section field aliases (or #id) with values from the attachment. Do NOT click Add again."
+        ? 'Return {"action":"fill","selector":"<field alias>","value":"<from attachment>"} for the first required field. Do NOT click Add again.'
+        : "Call fill with the first required field alias and value from the attachment. Do NOT click Add again."
     }`
   }
 
-  if (lastToolName === "fill_fields") {
+  if (lastToolName === "fill" || lastToolName === "fill_fields") {
     const pending = remaining.filter((item) => item.expected > 0 && item.remaining > 0)
     if (!pending.length) {
       return `${ADD_ENTRY_TURN_HINT_PREFIX}${progressSuffix} ${formatCompletionDoneHint(remaining, textActionMode)}`
@@ -487,15 +502,15 @@ export function buildAddEntryTurnHint(
     if (next.onPage === 0) {
       return `${ADD_ENTRY_TURN_HINT_PREFIX} ${
         textActionMode
-          ? `Return ONE action: ${formatClickSectionAction(next.sectionLabel, true)} then fill_fields for the first ${next.sectionLabel} entry.`
-          : `Call click (${next.sectionLabel}) then fill_fields for the first ${next.sectionLabel} entry.`
+          ? `Return ONE action: ${formatClickSectionAction(next.sectionLabel, true)} then fill each required field for the first ${next.sectionLabel} entry.`
+          : `Call click (${next.sectionLabel}) then fill each required field for the first ${next.sectionLabel} entry.`
       }${progressSuffix}`
     }
 
     return `${ADD_ENTRY_TURN_HINT_PREFIX} ${
       textActionMode
         ? `Return ONE action for the next unsaved ${next.sectionLabel} entry, or {"action":"done","message":"..."} when all items are saved.`
-        : `Call the next tool (fill_fields or done) for the next unsaved ${next.sectionLabel} entry.`
+        : `Call fill for the next required field, or done when all ${next.sectionLabel} items are saved.`
     }${progressSuffix}`
   }
 
@@ -527,13 +542,13 @@ Use tools to complete multi-step browser tasks. Ask before submit/delete when un
 
 Add-entry workflow (repeat for EACH item from the user's documents):
 1. Complete ALL items in one section before opening the next (${sectionOrder}). Only one section form can be open at a time.
-2. Open a section: {"action":"click","section":${JSON.stringify(firstSection)}} — then fill_fields for the FIRST item.
-3. After each fill_fields, the extension auto-saves and reopens the form — read addEntry.nextStep and fill the NEXT item (different data).
+2. Open a section: {"action":"click","section":${JSON.stringify(firstSection)}} — then fill each required field for the FIRST item (one fill per field).
+3. After all required fields are filled, the extension auto-saves and reopens the form — read addEntry.nextStep and fill the NEXT item (different data).
 4. When every item in the current section is saved, open the next section and repeat.
 5. Call done when every expected attachment item is saved — never re-add entries already listed under "Saved entries on page".
 
 Rules:
-- One fill_fields per entry with ALL REQUIRED fields — then wait for auto-advance.
+- One fill call per field — when all REQUIRED fields are filled, wait for auto-advance.
 - For selects, use exact option values from the field list (e.g. IR not Iran). Never use Choose or -1.
 - REQUIRED fields marked in the alias list; "attachment:" hints show where attachment data lives under a different name.
 - Field selectors are listed below — do not call get_page_content unless a click or fill failed.

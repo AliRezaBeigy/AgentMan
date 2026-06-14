@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest"
 
-import { parseFillFieldsArg } from "~/lib/tool-args"
 import {
   appendTextActionInstructions,
   buildTextActionSystemPrompt,
@@ -19,6 +18,7 @@ import {
   deepseekDone,
   deepseekFillFieldsWithIds,
   deepseekFillFieldsWorkExperience,
+  deepseekFillSingleField,
   deepseekNarrationOnly
 } from "./fixtures/deepseek-text-actions"
 
@@ -82,25 +82,23 @@ describe("agent text-action flow (deepseek-coder-v2:lite)", () => {
     expect(String(calls[0].args.selector)).toContain("showAddnewSkill")
   })
 
-  it("converts deepseek fill_fields response into executable field mappings", () => {
-    const calls = textActionToToolCalls(deepseekFillFieldsWorkExperience)
+  it("converts single-field fill response into fill tool call", () => {
+    const calls = textActionToToolCalls(deepseekFillSingleField)
     expect(calls).toHaveLength(1)
-    expect(calls[0].name).toBe("fill_fields")
+    expect(calls[0].name).toBe("fill")
+    expect(calls[0].args.selector).toBe("#job-title")
+    expect(String(calls[0].args.value)).toContain("Teaching Assistant")
+  })
 
-    const fields = parseFillFieldsArg(calls[0].args.fields)
-    expect(fields.length).toBeGreaterThanOrEqual(4)
-    expect(fields.find((f) => f.value.includes("Teaching Assistant"))).toBeTruthy()
-    expect(fields.find((f) => f.value === "Tehran")).toBeTruthy()
+  it("rejects batch fill_fields responses", () => {
+    expect(textActionToToolCalls(deepseekFillFieldsWorkExperience)).toHaveLength(0)
+    expect(textActionToToolCalls(deepseekFillFieldsWithIds)).toHaveLength(0)
+    expect(looksLikeFailedTextAction(deepseekFillFieldsWorkExperience)).toBe(true)
   })
 
   it("handles id-based selectors from the retry guidance", () => {
     const clickCalls = textActionToToolCalls(deepseekClickWithId)
     expect(clickCalls[0].args.selector).toBe("#add-experience-btn")
-
-    const fillCalls = textActionToToolCalls(deepseekFillFieldsWithIds)
-    const fields = parseFillFieldsArg(fillCalls[0].args.fields)
-    expect(fields).toHaveLength(2)
-    expect(fields[0].selector).toBe("#job-title")
   })
 
   it("recognizes done action and stops the loop", () => {
@@ -121,8 +119,7 @@ describe("agent text-action flow (deepseek-coder-v2:lite)", () => {
   it("simulates a multi-turn add-entry workflow from deepseek responses", () => {
     const turns = [
       { input: deepseekClickWorkExperience, expectedTool: "click" },
-      { input: deepseekFillFieldsWorkExperience, expectedTool: "fill_fields" },
-      { input: deepseekFillFieldsWithIds, expectedTool: "fill_fields" },
+      { input: deepseekFillSingleField, expectedTool: "fill" },
       { input: deepseekDone, expectedTool: "done" }
     ]
 
@@ -134,7 +131,7 @@ describe("agent text-action flow (deepseek-coder-v2:lite)", () => {
 
   it("includes add-entry selectors in the text-action system prompt", () => {
     const prompt = buildTextActionSystemPrompt()
-    expect(prompt).toContain("fill_fields")
+    expect(prompt).toContain('"action":"fill"')
     expect(prompt).toContain('"section":"<section label>"')
     expect(prompt).toContain('{"action":"done"')
   })

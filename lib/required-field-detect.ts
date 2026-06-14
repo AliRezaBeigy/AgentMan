@@ -174,5 +174,5 @@ export function buildMissingRequiredMessage(missing: FormFieldDescriptor[]): str
     const label = field.label ?? field.selector
     return indirect ? `- ${label} (${indirect})` : `- ${label}`
   })
-  return `Missing required fields — fill_fields must include:\n${lines.join("\n")}`
+  return `Missing required fields — call fill for each:\n${lines.join("\n")}`
 }

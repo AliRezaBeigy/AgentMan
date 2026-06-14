@@ -35,38 +35,15 @@ export const AGENT_TOOLS: OllamaTool[] = [
     type: "function",
     function: {
       name: "fill",
-      description: "Set the value of an input, textarea, or select element",
+      description:
+        "Set ONE form field. Call once per field with a single selector and value — never batch multiple fields. Use field aliases from the system prompt (e.g. work:title). After all required fields for the current entry are filled, the extension auto-saves.",
       parameters: {
         type: "object",
         properties: {
-          selector: { type: "string" },
-          value: { type: "string" }
+          selector: { type: "string", description: "Field alias or CSS selector" },
+          value: { type: "string", description: "Value from the attachment" }
         },
         required: ["selector", "value"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "fill_fields",
-      description: "Set multiple input, textarea, or select elements in one step",
-      parameters: {
-        type: "object",
-        properties: {
-          fields: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                selector: { type: "string" },
-                value: { type: "string" }
-              },
-              required: ["selector", "value"]
-            }
-          }
-        },
-        required: ["fields"]
       }
     }
   },

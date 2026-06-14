@@ -15,6 +15,8 @@ export interface OllamaMessage {
   content: string
   images?: string[]
   tool_name?: string
+  /** Required on assistant turns when replaying native tool-call history to Ollama. */
+  tool_calls?: OllamaToolCall[]
 }
 
 export interface OllamaTool {
@@ -37,8 +39,14 @@ export interface ChatOptions {
   shouldAbort?: (contentSoFar: string) => boolean
   /** Keep model in VRAM between requests — enables Ollama KV prefix cache. */
   keepAlive?: string | number
+  /** Enable reasoning trace for thinking models (qwen3, deepseek-r1, etc.). */
+  think?: boolean | "low" | "medium" | "high"
   options?: Record<string, unknown>
+  /** Called as native tool_calls stream in (arguments may be partial). */
+  onToolCallDelta?: (toolCalls: OllamaToolCall[]) => void
   onChunk?: (delta: string) => void
+  /** Reasoning tokens from thinking models (Ollama message.thinking). */
+  onThinkingChunk?: (delta: string) => void
 }
 
 export interface ChatResult {
@@ -101,8 +109,11 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
     stream = true,
     format,
     keepAlive,
+    think,
     options: ollamaOptions,
     onChunk,
+    onToolCallDelta,
+    onThinkingChunk,
     shouldAbort
   } = chatOptions
   const body: Record<string, unknown> = {
@@ -112,6 +123,9 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
   }
   if (keepAlive !== undefined) {
     body.keep_alive = keepAlive
+  }
+  if (think !== undefined) {
+    body.think = think
   }
   if (tools?.length) {
     body.tools = tools
@@ -184,6 +198,7 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
         load_duration?: number
         message?: {
           content?: string
+          thinking?: string
           tool_calls?: OllamaToolCall[]
         }
       }
@@ -192,6 +207,10 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
       }
       const chunkTiming = timingFromOllamaChunk(chunk)
       if (chunkTiming) timing = chunkTiming
+      const thinkingDelta = chunk.message?.thinking ?? ""
+      if (thinkingDelta) {
+        onThinkingChunk?.(thinkingDelta)
+      }
       const delta = chunk.message?.content ?? ""
       if (delta) {
         content += delta
@@ -202,7 +221,8 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
         onChunk?.(delta)
       }
       if (chunk.message?.tool_calls?.length) {
-        toolCalls.push(...chunk.message.tool_calls)
+        mergeStreamingToolCalls(toolCalls, chunk.message.tool_calls)
+        onToolCallDelta?.(toolCalls)
       }
     }
   }
@@ -220,6 +240,65 @@ export async function chat(chatOptions: ChatOptions): Promise<ChatResult> {
 function logChatTiming(timing?: OllamaChatTiming): void {
   if (!timing) return
   devLog("Ollama prompt eval", timing)
+}
+
+function mergeStreamingToolCalls(
+  accumulated: OllamaToolCall[],
+  incoming: OllamaToolCall[]
+): void {
+  for (let i = 0; i < incoming.length; i++) {
+    const call = incoming[i]!
+    const idx = (call as { index?: number }).index ?? accumulated.length
+    const prev = accumulated[idx]
+    if (!prev) {
+      accumulated[idx] = call
+      continue
+    }
+    accumulated[idx] = {
+      function: {
+        name: call.function.name || prev.function.name,
+        arguments: mergeToolCallArguments(prev.function.arguments, call.function.arguments)
+      }
+    }
+  }
+}
+
+function mergeToolCallArguments(prev: unknown, next: unknown): unknown {
+  if (typeof prev === "string" || typeof next === "string") {
+    return stringifyToolArguments(prev) + stringifyToolArguments(next)
+  }
+
+  if (
+    prev &&
+    next &&
+    typeof prev === "object" &&
+    typeof next === "object" &&
+    !Array.isArray(prev) &&
+    !Array.isArray(next)
+  ) {
+    const prevFields = (prev as { fields?: unknown }).fields
+    const nextFields = (next as { fields?: unknown }).fields
+    if (Array.isArray(prevFields) || Array.isArray(nextFields)) {
+      const prevArr = Array.isArray(prevFields) ? prevFields : []
+      const nextArr = Array.isArray(nextFields) ? nextFields : []
+      const fields = nextArr.length >= prevArr.length ? nextArr : prevArr
+      return { ...(next as Record<string, unknown>), fields }
+    }
+  }
+
+  return next ?? prev
+}
+
+function stringifyToolArguments(args: unknown): string {
+  if (typeof args === "string") return args
+  if (args && typeof args === "object") {
+    try {
+      return JSON.stringify(args)
+    } catch {
+      return ""
+    }
+  }
+  return ""
 }
 
 function parseChatResponse(data: {

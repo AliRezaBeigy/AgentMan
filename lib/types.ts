@@ -2,11 +2,29 @@ export type ChatMode = "fill" | "agent" | "assist"
 
 export type MessageRole = "user" | "assistant" | "system" | "tool"
 
+export interface ChatAttachmentRef {
+  id: string
+  name: string
+}
+
+export type AgentStepStatus = "running" | "done" | "error"
+
+export interface AgentActivityStep {
+  id: string
+  label: string
+  status: AgentStepStatus
+  detail?: string
+}
+
 export interface ChatMessage {
   id: string
   role: MessageRole
   content: string
   images?: string[]
+  /** File attachments shown as bubbles (not inlined in content). */
+  attachments?: ChatAttachmentRef[]
+  /** Collapsible agent action log for assistant messages. */
+  agentSteps?: AgentActivityStep[]
   createdAt: number
   isStreaming?: boolean
 }

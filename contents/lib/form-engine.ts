@@ -653,6 +653,12 @@ export async function applyFieldMappings(
         (el.getAttribute("role") === "combobox" || field?.widget === "combobox")
       ) {
         setComboboxValue(el, value, field)
+      } else if (el instanceof HTMLInputElement && el.type !== "checkbox" && el.type !== "radio") {
+        await typeTextIntoElement(el, String(mapping.value))
+      } else if (el instanceof HTMLTextAreaElement) {
+        await typeTextIntoElement(el, String(mapping.value))
+      } else if (el.getAttribute("contenteditable") === "true") {
+        await typeContentEditable(el as HTMLElement, String(mapping.value))
       } else {
         setFieldValue(el, mapping.value)
       }
@@ -807,6 +813,76 @@ async function setButtonGroupValue(
   }
 
   throw new Error(`Option "${value}" not found in button group`)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+const TYPING_MAX_DURATION_MS = 3500
+const TYPING_BASE_DELAY_MS = 28
+const TYPING_MIN_DELAY_MS = 8
+
+async function typeTextIntoElement(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  value: string
+): Promise<void> {
+  el.focus()
+  el.scrollIntoView({ block: "nearest", behavior: "smooth" })
+  const prevOutline = el.style.outline
+  const prevOffset = el.style.outlineOffset
+  el.style.outline = "2px solid hsl(142 71% 45%)"
+  el.style.outlineOffset = "2px"
+
+  try {
+    if (!value) {
+      setNativeValue(el, "")
+      dispatchInputEvents(el)
+      return
+    }
+
+    const delayMs = Math.max(
+      TYPING_MIN_DELAY_MS,
+      Math.min(TYPING_BASE_DELAY_MS, TYPING_MAX_DURATION_MS / value.length)
+    )
+
+    setNativeValue(el, "")
+    dispatchInputEvents(el)
+
+    for (let i = 0; i < value.length; i++) {
+      setNativeValue(el, value.slice(0, i + 1))
+      dispatchInputEvents(el)
+      await sleep(delayMs)
+    }
+  } finally {
+    el.style.outline = prevOutline
+    el.style.outlineOffset = prevOffset
+  }
+}
+
+async function typeContentEditable(el: HTMLElement, value: string): Promise<void> {
+  el.focus()
+  el.scrollIntoView({ block: "nearest", behavior: "smooth" })
+
+  if (!value) {
+    el.textContent = ""
+    dispatchInputEvents(el)
+    return
+  }
+
+  const delayMs = Math.max(
+    TYPING_MIN_DELAY_MS,
+    Math.min(TYPING_BASE_DELAY_MS, TYPING_MAX_DURATION_MS / value.length)
+  )
+
+  el.textContent = ""
+  dispatchInputEvents(el)
+
+  for (let i = 0; i < value.length; i++) {
+    el.textContent = value.slice(0, i + 1)
+    dispatchInputEvents(el)
+    await sleep(delayMs)
+  }
 }
 
 function setNativeValue(
@@ -986,10 +1062,6 @@ export async function ensureRepeatableRows(
   }
 
   return { added, rowCount }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export function getTextSummary(maxLength = 4000): string {

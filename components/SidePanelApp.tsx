@@ -29,6 +29,7 @@ import {
 import { MessageType, type ChatHistoryEntry } from "~/lib/messages"
 import { getSettings } from "~/lib/storage"
 import type {
+  AgentActivityStep,
   AgentState,
   ChatMessage as ChatMessageType,
   ChatMode,
@@ -48,6 +49,38 @@ function toHistoryEntries(messages: ChatMessageType[]): ChatHistoryEntry[] {
       content: m.content,
       images: m.images
     }))
+}
+
+function mergeAgentStep(
+  steps: AgentActivityStep[] | undefined,
+  step: AgentActivityStep
+): AgentActivityStep[] {
+  const list = steps ? [...steps] : []
+  const index = list.findIndex((item) => item.id === step.id)
+  if (index >= 0) {
+    list[index] = { ...list[index], ...step }
+  } else {
+    list.push(step)
+  }
+  return list
+}
+
+function ensureStreamingAssistant(messages: ChatMessageType[]): ChatMessageType[] {
+  const next = [...messages]
+  const last = next[next.length - 1]
+  if (!last || last.role !== "assistant") {
+    next.push({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: "",
+      agentSteps: [],
+      createdAt: Date.now(),
+      isStreaming: true
+    })
+  } else if (!last.agentSteps) {
+    next[next.length - 1] = { ...last, agentSteps: [] }
+  }
+  return next
 }
 
 export function SidePanelApp() {
@@ -105,21 +138,25 @@ export function SidePanelApp() {
         const payload = message.payload as { sessionId: string; delta: string }
         if (payload.sessionId !== activeId) return
         setSession((prev) => {
-          const messages = [...prev.messages]
-          const last = messages[messages.length - 1]
-          if (!last || last.role !== "assistant") {
-            messages.push({
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content: payload.delta,
-              createdAt: Date.now(),
-              isStreaming: true
-            })
-          } else {
-            messages[messages.length - 1] = {
-              ...last,
-              content: last.content + payload.delta
-            }
+          let messages = ensureStreamingAssistant([...prev.messages])
+          const last = messages[messages.length - 1]!
+          messages[messages.length - 1] = {
+            ...last,
+            content: last.content + payload.delta
+          }
+          return { ...prev, messages }
+        })
+      }
+
+      if (message.type === MessageType.CHAT_AGENT_STEP) {
+        const payload = message.payload as { sessionId: string; step: AgentActivityStep }
+        if (payload.sessionId !== activeId) return
+        setSession((prev) => {
+          let messages = ensureStreamingAssistant([...prev.messages])
+          const last = messages[messages.length - 1]!
+          messages[messages.length - 1] = {
+            ...last,
+            agentSteps: mergeAgentStep(last.agentSteps, payload.step)
           }
           return { ...prev, messages }
         })
@@ -224,6 +261,10 @@ export function SidePanelApp() {
     if (!last || last.role !== "user") return
 
     const history = toHistoryEntries(messages.slice(0, -1))
+    const attachmentIds =
+      stagedFileIds.length > 0
+        ? stagedFileIds
+        : (last.attachments?.map((file) => file.id) ?? [])
 
     await chrome.runtime.sendMessage({
       type: chatMode === "fill" ? MessageType.FILL_EXECUTE : MessageType.CHAT_SEND,
@@ -232,7 +273,7 @@ export function SidePanelApp() {
         mode: chatMode,
         content: last.content,
         images: last.images,
-        stagedFileIds: stagedFileIds.length ? stagedFileIds : undefined,
+        stagedFileIds: attachmentIds.length ? attachmentIds : undefined,
         history
       }
     })
@@ -300,15 +341,11 @@ export function SidePanelApp() {
     if (!content && !pendingImages.length && !attachments.length) return
     if (isBusy) return
 
-    const attachmentNote =
-      attachments.length > 0
-        ? `\n\n[Attached: ${attachments.map((f) => f.name).join(", ")}]`
-        : ""
-
     const userMessage: ChatMessageType = {
       id: crypto.randomUUID(),
       role: "user",
-      content: content + attachmentNote,
+      content,
+      attachments: attachments.map((file) => ({ id: file.id, name: file.name })),
       images: pendingImages.length ? [...pendingImages] : undefined,
       createdAt: Date.now()
     }
@@ -446,8 +483,8 @@ export function SidePanelApp() {
         />
       </header>
 
-      <ScrollArea className="flex-1 px-3 py-4">
-        <div className="space-y-3">
+      <ScrollArea className="flex-1 px-2 py-2">
+        <div className="space-y-2">
           {session.messages.length === 0 && (
             <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
               {mode === "fill" &&

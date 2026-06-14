@@ -1,5 +1,7 @@
 import { formatSavedEntriesBlock } from "~/lib/add-entry-saved-rows"
 import { cdpSession } from "~/background/cdp/session"
+import type { SequentialFillProgress, SequentialFillResult } from "~/lib/fill-sequential"
+import { sendToPageTab } from "~/lib/tab-messaging"
 import { MessageType } from "~/lib/messages"
 import { parseFillFieldsArg } from "~/lib/tool-args"
 import type { PageContext } from "~/lib/types"
@@ -19,6 +21,61 @@ async function notifyCursor(tabId: number, x: number, y: number, caption: string
     type: MessageType.CURSOR_CAPTION,
     payload: { text: caption }
   })
+}
+
+async function notifyCursorCaption(tabId: number, caption: string) {
+  await chrome.tabs.sendMessage(tabId, {
+    type: MessageType.CURSOR_CAPTION,
+    payload: { text: caption }
+  })
+}
+
+export async function fillFieldsSequential(
+  tabId: number,
+  fields: Array<{ selector: string; value: string }>,
+  onProgress?: (progress: SequentialFillProgress) => void
+): Promise<SequentialFillResult[]> {
+  const results: SequentialFillResult[] = []
+  const total = fields.length
+
+  for (let index = 0; index < fields.length; index++) {
+    const item = fields[index]!
+    if (!item.selector) continue
+
+    onProgress?.({ index: index + 1, total, selector: item.selector })
+    await notifyCursorCaption(
+      tabId,
+      `Filling field ${index + 1}/${total}: ${item.selector.slice(0, 48)}`
+    )
+
+    try {
+      const applyRes = await sendToPageTab<{
+        ok?: boolean
+        results?: Array<{ ok: boolean; selector?: string; error?: string }>
+      }>(tabId, {
+        type: MessageType.FILL_APPLY,
+        payload: { mappings: [{ selector: item.selector, value: item.value }] }
+      })
+
+      const applied = applyRes?.results?.[0]
+      if (applied?.ok) {
+        results.push({ selector: item.selector, ok: true })
+        continue
+      }
+
+      await cdpSession.attach(tabId)
+      await cdpSession.fillSelector(item.selector, item.value)
+      results.push({ selector: item.selector, ok: true })
+    } catch (error) {
+      results.push({
+        selector: item.selector,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  return results
 }
 
 export async function executeTool(
@@ -85,15 +142,10 @@ export async function executeTool(
             result: { filled: 0, results: [], parseError: true }
           }
         }
-        const results: Array<{ selector: string; ok: boolean; error?: string }> = []
-        await chrome.tabs.sendMessage(tabId, {
-          type: MessageType.CURSOR_CAPTION,
-          payload: { text: `Filling ${fields.length} field(s)` }
-        })
-        const batchItems = fields
-          .filter((item) => item.selector)
-          .map((item) => ({ selector: item.selector, value: item.value }))
-        results.push(...(await cdpSession.fillSelectorsBatch(batchItems)))
+        const results = await fillFieldsSequential(
+          tabId,
+          fields.filter((item) => item.selector)
+        )
         const failed = results.filter((r) => !r.ok)
         return {
           ok: failed.length === 0,

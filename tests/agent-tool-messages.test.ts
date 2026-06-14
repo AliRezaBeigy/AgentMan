@@ -1,10 +1,73 @@
 import { describe, expect, it } from "vitest"
 import {
   compactToolResultForAgent,
-  formatAgentToolResultMessage
+  formatAgentToolResultMessage,
+  formatCompactAgentToolResultMessage
 } from "~/lib/agent-tool-messages"
 
 describe("compactToolResultForAgent", () => {
+  it("guides to next field when fill is skipped as duplicate", () => {
+    const msg = formatCompactAgentToolResultMessage("fill", {
+      ok: true,
+      result: {
+        skipped: true,
+        nextField: "work:employer",
+        addEntry: {
+          submitted: false,
+          nextStep:
+            '"work:title" is already filled. Call fill with selector "work:employer" next (Work experience - Employer).'
+        }
+      }
+    })
+    expect(msg).toContain("work:employer")
+  })
+
+  it("strips large fill payload but keeps addEntry summary", () => {
+    const compact = compactToolResultForAgent("fill", {
+      ok: true,
+      result: {
+        filled: 1,
+        selector: "#job-title",
+        value: "Engineer",
+        addEntry: {
+          submitted: true,
+          openedNext: true,
+          sectionLabel: "Work experience",
+          entryNumber: 2,
+          nextStep: "Fill entry 2",
+          entryAdded: true,
+          savedCount: 2,
+          sessionAdded: 1,
+          lastSavedSummary: "Engineer @ Acme"
+        }
+      }
+    })
+
+    expect(compact).toEqual({
+      ok: true,
+      filled: 1,
+      skipped: undefined,
+      error: undefined,
+      selector: "#job-title",
+      value: "Engineer",
+      partialCount: undefined,
+      duplicateEntry: undefined,
+      missingRequired: undefined,
+      addEntry: {
+        submitted: true,
+        openedNext: true,
+        sectionLabel: "Work experience",
+        entryNumber: 2,
+        nextStep: "Fill entry 2",
+        entryAdded: true,
+        savedCount: 2,
+        sessionAdded: 1,
+        lastSavedSummary: "Engineer @ Acme",
+        error: undefined
+      }
+    })
+  })
+
   it("strips large fill_fields payload but keeps addEntry summary", () => {
     const compact = compactToolResultForAgent("fill_fields", {
       ok: true,

@@ -170,6 +170,12 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
             payload: { sessionId, delta }
           })
         },
+        onAgentStep: (step) => {
+          chrome.runtime.sendMessage({
+            type: MessageType.CHAT_AGENT_STEP,
+            payload: { sessionId, step }
+          })
+        },
         onDone: (finalContent) => {
           chrome.runtime.sendMessage({
             type: MessageType.CHAT_DONE,

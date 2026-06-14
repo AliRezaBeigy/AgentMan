@@ -27,6 +27,10 @@ export const deepseekFillFieldsWorkExperience = `\`\`\`json
 }
 \`\`\``
 
+export const deepseekFillSingleField = `\`\`\`json
+{"action":"fill","selector":"#job-title","value":"Teaching Assistant (Advanced Programming)"}
+\`\`\``
+
 export const deepseekFillFieldsWithIds = `\`\`\`json
 {"action":"fill_fields","fields":[{"selector":"#job-title","value":"Teaching Assistant"},{"selector":"#job-company","value":"Dr. Azadeh Mansouri"}]}
 \`\`\``

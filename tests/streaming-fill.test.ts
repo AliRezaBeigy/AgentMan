@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   extractCompleteFillFieldsFromStream,
+  extractCompleteFillObjectEntriesFromStream,
   filterFieldsNotYetFilled
 } from "~/lib/streaming-fill"
 
@@ -49,5 +50,18 @@ describe("streaming-fill", () => {
       new Map([["#a", "1"]])
     )
     expect(remaining).toEqual([{ selector: "#b", value: "2" }])
+  })
+
+  it("extracts complete flat object keys from a partial fill stream", () => {
+    const partial = `{"Full name": "Ada Lovelace", "Email": "ada@`
+    const applied = new Set<string>()
+    const allowed = new Set(["Full name", "Email", "Company"])
+    const first = extractCompleteFillObjectEntriesFromStream(partial, applied, allowed)
+    expect(first).toEqual([{ key: "Full name", value: "Ada Lovelace" }])
+
+    applied.add("Full name")
+    const complete = `{"Full name": "Ada Lovelace", "Email": "ada@example.com"}`
+    const second = extractCompleteFillObjectEntriesFromStream(complete, applied, allowed)
+    expect(second).toEqual([{ key: "Email", value: "ada@example.com" }])
   })
 })
