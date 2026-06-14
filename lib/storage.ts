@@ -1,4 +1,5 @@
 import type { AppSettings, Snippet } from "~/lib/types"
+import { DEFAULT_AGENT_ITERATION_LIMIT } from "~/lib/agent-iterations"
 import { DEFAULT_SETTINGS } from "~/lib/types"
 
 const SETTINGS_KEY = "agentman_settings"
@@ -6,7 +7,16 @@ const SNIPPETS_KEY = "agentman_snippets"
 
 export async function getSettings(): Promise<AppSettings> {
   const result = await chrome.storage.local.get(SETTINGS_KEY)
-  return { ...DEFAULT_SETTINGS, ...(result[SETTINGS_KEY] as AppSettings | undefined) }
+  const saved = result[SETTINGS_KEY] as AppSettings | undefined
+  const merged = { ...DEFAULT_SETTINGS, ...saved }
+  if (
+    saved?.maxAgentIterations != null &&
+    saved.maxAgentIterations > 0 &&
+    saved.maxAgentIterations < DEFAULT_AGENT_ITERATION_LIMIT
+  ) {
+    merged.maxAgentIterations = DEFAULT_SETTINGS.maxAgentIterations
+  }
+  return merged
 }
 
 export async function saveSettings(settings: Partial<AppSettings>): Promise<AppSettings> {

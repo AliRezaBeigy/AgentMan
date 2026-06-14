@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.1.0]
+
+### Feat
+- Settings: **Unlimited agent iterations** toggle for long multi-section fill runs
+- Settings: configurable **max agent iterations** (default **120**) when unlimited is off
+- GitHub Actions workflow: CI tests, build, and tagged releases with `CHANGELOG.md` notes
+
+### Fix
+- Raise default agent iteration budget from 68/150 to **120** for delegated Add-entry fill
+- Track **all section fields** (not only DOM-required) before auto-save — city, country, description no longer skipped
+- Varbi budget/staff `0` values count as filled; auto-default responsibility selects before submit
+
+### Chore
+- Add `yarn test:ci` (unit tests without Ollama integration)
+- Upgrade stored settings below 120 iterations to the new default automatically
+
 ## [v1.0.0]
 
 Initial public release.

@@ -8,6 +8,7 @@ import {
   thinkingStepId,
   toolStepId
 } from "~/lib/agent-steps"
+import { isUnlimitedAgentIterations } from "~/lib/agent-iterations"
 import {
   compactToolResultForAgent,
   formatAgentToolResultMessage,
@@ -339,7 +340,11 @@ class AgentController {
         lastUserMessage,
         settings.maxAgentIterations
       )
-      devLog("Delegated agent iteration budget", { iterationBudget })
+      devLog("Delegated agent iteration budget", {
+        iterationBudget: isUnlimitedAgentIterations(iterationBudget)
+          ? "unlimited"
+          : iterationBudget
+      })
       await this.runAgentLoop(ctx, agentMessages, model, host, iterationBudget, {
         addEntryMode: true,
         ollamaKeepAlive: settings.ollamaKeepAlive
@@ -808,7 +813,9 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
       appendTextActionInstructions(messages, Boolean(options.addEntryMode))
     }
 
-    for (let i = 0; i < maxIterations; i++) {
+    const unlimitedIterations = isUnlimitedAgentIterations(maxIterations)
+    let i = 0
+    while (unlimitedIterations || i < maxIterations) {
       if (this.abort) break
       while (this.paused && !this.abort) {
         await sleep(200)
@@ -1129,9 +1136,11 @@ ${JSON.stringify(retryTemplate, null, 2)}${optionHints}${userRequestReminder}`
         }
         this.lastAgentToolName = toolName
       }
+
+      i++
     }
 
-    if (this.state.iteration >= maxIterations && !finalContent) {
+    if (!unlimitedIterations && this.state.iteration >= maxIterations && !finalContent) {
       ctx.onError(`Agent reached the maximum of ${maxIterations} iterations.`)
       return
     }

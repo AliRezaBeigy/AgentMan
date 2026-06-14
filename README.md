@@ -333,6 +333,6 @@ Stack: **Plasmo · React · Tailwind · Radix · Vitest**
 
 <br />
 
-<sub>v0.1.0 · Early access · Built for people who apply at scale</sub>
+<sub>v1.1.0 · Early access · Built for people who apply at scale</sub>
 
 </div>

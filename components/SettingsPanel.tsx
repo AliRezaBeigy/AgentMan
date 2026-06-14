@@ -11,6 +11,11 @@ import {
 } from "~/components/ui/select"
 import { Switch } from "~/components/ui/switch"
 import { MessageType } from "~/lib/messages"
+import {
+  clampAgentIterationLimit,
+  DEFAULT_AGENT_ITERATION_LIMIT,
+  isUnlimitedAgentIterations
+} from "~/lib/agent-iterations"
 import { getSettings, saveSettings } from "~/lib/storage"
 import type { AppSettings } from "~/lib/types"
 
@@ -110,6 +115,56 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           </div>
         )
       })}
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium">Unlimited agent iterations</p>
+            <p className="text-xs text-muted-foreground">
+              No cap on LLM turns per Fill/Agent run (stop manually if needed)
+            </p>
+          </div>
+          <Switch
+            checked={isUnlimitedAgentIterations(settings.maxAgentIterations)}
+            onCheckedChange={async (checked) => {
+              const next = await saveSettings({
+                maxAgentIterations: checked
+                  ? 0
+                  : clampAgentIterationLimit(
+                      settings.maxAgentIterations || DEFAULT_AGENT_ITERATION_LIMIT
+                    )
+              })
+              setSettings(next)
+            }}
+          />
+        </div>
+        {!isUnlimitedAgentIterations(settings.maxAgentIterations) && (
+          <>
+            <label className="text-sm font-medium">Max agent iterations</label>
+            <Input
+              type="number"
+              min={1}
+              max={100000}
+              value={settings.maxAgentIterations}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  maxAgentIterations: clampAgentIterationLimit(Number(e.target.value) || 1)
+                })
+              }
+              onBlur={async () => {
+                const next = await saveSettings({
+                  maxAgentIterations: clampAgentIterationLimit(settings.maxAgentIterations)
+                })
+                setSettings(next)
+              }}
+            />
+            <p className="text-xs text-muted-foreground">
+              Default {DEFAULT_AGENT_ITERATION_LIMIT}. Increase for large multi-section forms.
+            </p>
+          </>
+        )}
+      </div>
 
       <div className="flex items-center justify-between">
         <div>

@@ -1,3 +1,5 @@
+import { DEFAULT_AGENT_ITERATION_LIMIT } from "~/lib/agent-iterations"
+
 export type ChatMode = "fill" | "agent" | "assist"
 
 export type MessageRole = "user" | "assistant" | "system" | "tool"
@@ -52,6 +54,7 @@ export interface AppSettings {
   agentModel: string
   assistModel: string
   theme: "light" | "dark"
+  /** Max agent LLM turns per run; 0 = unlimited. */
   maxAgentIterations: number
   /** Keep model loaded between agent steps for KV prefix cache (e.g. "30m", -1). */
   ollamaKeepAlive: string | number
@@ -150,6 +153,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   agentModel: "",
   assistModel: "",
   theme: "dark",
-  maxAgentIterations: 30,
+  maxAgentIterations: DEFAULT_AGENT_ITERATION_LIMIT,
   ollamaKeepAlive: "30m"
 }

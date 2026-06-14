@@ -9,6 +9,10 @@ import { pickCssSelector } from "~/lib/add-entry-workflow"
 import { buildFillFieldAliasRegistry } from "~/lib/fill-field-aliases"
 import { getFillableFields } from "~/lib/fill-parse"
 import type { AddEntrySectionDescriptor, FormFieldDescriptor, PageContext } from "~/lib/types"
+import {
+  isUnlimitedAgentIterations,
+  UNLIMITED_AGENT_ITERATIONS
+} from "~/lib/agent-iterations"
 
 const STOP_WORDS = new Set([
   "add",
@@ -133,6 +137,8 @@ export function estimateDelegatedAgentIterations(
   userMessage: string,
   baseLimit: number
 ): number {
+  if (isUnlimitedAgentIterations(baseLimit)) return UNLIMITED_AGENT_ITERATIONS
+
   const sections = filterAddEntrySectionsForIntent(
     pageContext.addEntrySections ?? [],
     userMessage,
@@ -142,7 +148,7 @@ export function estimateDelegatedAgentIterations(
   // ~4 LLM turns per entry (open, fill per field, auto-save) × estimated entries per section
   const estimatedEntriesPerSection = 8
   const estimated = sections.length * estimatedEntriesPerSection * 3 + fieldsPerEntry
-  return Math.max(baseLimit, Math.min(estimated, 150))
+  return Math.max(baseLimit, Math.min(estimated, baseLimit))
 }
 
 /** Model claims the add-entry task is finished (may be true or false). */
